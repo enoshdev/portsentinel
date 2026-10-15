@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <!-- Favicon: Clear at 16px, near-white #fafafa ground with crisp #171717 radar ring -->
+  <rect width="32" height="32" rx="6" fill="#fafafa"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="5.5" stroke="#ebebeb" stroke-width="1"/>
+  <g transform="translate(4, 4)">
+    <path d="M 12 3.5 A 8.5 8.5 0 1 1 5.2 16.5" 
+          stroke="#171717" 
+          stroke-width="2.25" 
+          stroke-linecap="round"/>
+    <circle cx="5.2" cy="16.5" r="2" fill="#171717"/>
+  </g>
+</svg>

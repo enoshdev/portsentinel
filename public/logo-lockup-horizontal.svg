@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 32" width="160" height="32" fill="none">
+  <g transform="translate(4, 4)">
+    <path d="M 12 3.5 A 8.5 8.5 0 1 1 5.2 16.5" 
+          stroke="#4C8DFF" 
+          stroke-width="2" 
+          stroke-linecap="round"/>
+    <path d="M 12 7.5 A 4.5 4.5 0 1 1 8.8 15.2" 
+          stroke="#4C8DFF" 
+          stroke-width="1.25" 
+          stroke-linecap="round" 
+          stroke-opacity="0.4"/>
+    <circle cx="5.2" cy="16.5" r="1.75" fill="#E6EDF3"/>
+    <circle cx="12" cy="12" r="1" fill="#4C8DFF"/>
+  </g>
+  <text x="36" y="21" font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif" font-size="15" letter-spacing="-0.4px">
+    <tspan fill="#E6EDF3" font-weight="500">Port</tspan>
+    <tspan fill="#4C8DFF" font-weight="600">Sentinel</tspan>
+  </text>
+</svg>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 28" width="150" height="28" fill="none">
+  <g transform="translate(2, 2)">
+    <path d="M 12 3.5 A 8.5 8.5 0 1 1 5.2 16.5" 
+          stroke="#171717" 
+          stroke-width="2" 
+          stroke-linecap="round"/>
+    <circle cx="5.2" cy="16.5" r="1.8" fill="#171717"/>
+  </g>
+  <text x="32" y="19" font-family="Geist, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="600" fill="#171717" letter-spacing="-0.4px">
+    PortSentinel
+  </text>
+</svg>
