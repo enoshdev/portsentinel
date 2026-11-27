@@ -215,22 +215,17 @@ class EventProcessor:
                 "origin": event_origin
             }
 
-            # Broadcast to WebSocket clients
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(ws_manager.broadcast({
-                        "type": "NEW_EVENT",
-                        "data": event_summary
-                    }))
-                    if auto_block_rule:
-                        asyncio.create_task(ws_manager.broadcast({
-                            "type": "FIREWALL_ACTION",
-                            "action": "AUTO_BLOCK",
-                            "rule": auto_block_rule.model_dump()
-                        }))
-            except Exception:
-                pass
+            # Broadcast to WebSocket clients safely across worker/sniffer threads
+            ws_manager.broadcast_sync({
+                "type": "NEW_EVENT",
+                "data": event_summary
+            })
+            if auto_block_rule:
+                ws_manager.broadcast_sync({
+                    "type": "FIREWALL_ACTION",
+                    "action": "AUTO_BLOCK",
+                    "rule": auto_block_rule.model_dump()
+                })
 
             return event_summary
 

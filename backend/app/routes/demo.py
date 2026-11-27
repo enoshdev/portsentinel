@@ -9,6 +9,7 @@ from backend.app.models.risk_history import RiskHistory
 from backend.app.models.firewall_rule import FirewallRule
 from backend.app.services.detection_engine import engine_instance
 from backend.app.services.event_processor import event_processor
+from backend.app.services.websocket_manager import ws_manager
 
 router = APIRouter(prefix="/demo", tags=["Demonstration Management"])
 
@@ -41,6 +42,7 @@ def clear_all_data(db: Session = Depends(get_db)) -> Dict[str, Any]:
     # Clear in-memory caches
     engine_instance.clear_history()
     event_processor._flow_cache.clear()
+    ws_manager.broadcast_sync({"type": "DATA_CLEARED"})
     
     return {
         "success": True,

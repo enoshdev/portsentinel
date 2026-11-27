@@ -199,8 +199,9 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
   };
 
   // Fetch all primary dashboard data from FastAPI backend
-  const fetchDashboardData = async () => {
-    setIsLoading(true);
+  const fetchDashboardData = async (silent = false) => {
+    const isSilent = silent === true;
+    if (!isSilent) setIsLoading(true);
     try {
       await api.checkHealth();
       const [statsData, ipsData, rulesData, logsData, fwStatus] = await Promise.all([
@@ -219,11 +220,13 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
       setBackendStatus('connected');
       setBackendError(null);
     } catch (err) {
-      console.warn('Backend unavailable:', err);
-      setBackendStatus('disconnected');
-      setBackendError(err.message || 'Cannot reach FastAPI backend server');
+      if (!isSilent) {
+        console.warn('Backend unavailable:', err);
+        setBackendStatus('disconnected');
+        setBackendError(err.message || 'Cannot reach FastAPI backend server');
+      }
     } finally {
-      setIsLoading(false);
+      if (!isSilent) setIsLoading(false);
     }
   };
 
@@ -232,15 +235,27 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     fetchMonitoringStatus();
     fetchInterfaces();
     fetchClientDevice();
+
+    // Background 2s auto-sync so live dashboard never needs manual page refresh
+    const syncTimer = setInterval(() => {
+      fetchDashboardData(true);
+      fetchMonitoringStatus();
+    }, 2000);
+
+    return () => clearInterval(syncTimer);
   }, []);
 
   // Real-time WebSocket Telemetry streaming
   useEffect(() => {
     const ws = createTelemetryWebSocket(
       (telemetry) => {
+        if (telemetry.type === 'DATA_CLEARED') {
+          fetchDashboardData(true);
+          return;
+        }
         if (telemetry.type === 'FIREWALL_ACTION') {
           triggerToast(`Automated Mitigation: Blocked ${telemetry.rule?.ip || 'host'} in Windows Firewall!`);
-          fetchDashboardData();
+          fetchDashboardData(true);
           return;
         }
 

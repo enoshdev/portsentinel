@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -7,11 +8,13 @@ from fastapi.responses import FileResponse
 from backend.app.config import settings
 from backend.app.database import init_db, SessionLocal
 from backend.app.services.demo_service import seed_demo_data
+from backend.app.services.websocket_manager import ws_manager
 from backend.app.routes import api_router, websocket_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle event handler for database initialization and initial scenario seeding."""
+    ws_manager.set_loop(asyncio.get_running_loop())
     init_db()
     if settings.DEMO_MODE:
         db = SessionLocal()
