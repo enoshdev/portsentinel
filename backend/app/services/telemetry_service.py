@@ -15,6 +15,7 @@ from backend.app.schemas.telemetry import (
     ConnectionEventCreate
 )
 from backend.app.schemas.dashboard import DashboardStatsResponse
+from backend.app.config import settings
 
 PORT_NAMES: Dict[int, str] = {
     21: "FTP",
@@ -61,7 +62,7 @@ def get_dashboard_stats(db: Session) -> DashboardStatsResponse:
         slidingWindowMinutes=60,
         totalPackets=total_connections,
         systemStatus="CONNECTED",
-        demoMode=True
+        demoMode=settings.DEMO_MODE
     )
 
 def format_monitored_ip(ip_row: MonitoredIP, db: Session) -> MonitoredIPResponse:

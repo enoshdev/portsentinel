@@ -45,7 +45,8 @@ class EventProcessor:
         tcp_flags: str = "SYN",
         timestamp: Optional[float] = None,
         event_origin: str = "live",
-        db: Optional[Session] = None
+        db: Optional[Session] = None,
+        device_label: Optional[str] = None
     ) -> Dict[str, Any]:
         """Processes a single connection event and evaluates automated mitigation."""
         now_ts = timestamp if timestamp is not None else time.time()
@@ -120,8 +121,8 @@ class EventProcessor:
                 host = MonitoredIP(
                     id=host_id,
                     ip_address=source_ip,
-                    label="Live Monitored Endpoint" if event_origin == "live" else f"Replay Endpoint ({source_ip})",
-                    host_type="Discovered Host",
+                    label=device_label or ("Live Monitored Endpoint" if event_origin == "live" else f"Replay Endpoint ({source_ip})"),
+                    host_type=device_label if device_label else "Discovered Host",
                     description=evaluation["reason"],
                     current_status=evaluation["status"],
                     current_risk_score=evaluation["score"],
@@ -138,6 +139,9 @@ class EventProcessor:
                 )
                 db.add(host)
             else:
+                if device_label:
+                    host.label = device_label
+                    host.host_type = device_label
                 host.description = evaluation["reason"]
                 host.current_status = evaluation["status"]
                 host.current_risk_score = evaluation["score"]
@@ -192,7 +196,9 @@ class EventProcessor:
                 "event_id": event_id,
                 "time": display_time,
                 "source_ip": source_ip,
+                "label": host.label,
                 "destination_port": destination_port,
+                "ports_probed": host.get_ports_list(),
                 "protocol": f"{protocol} {tcp_flags}".strip(),
                 "status": host.current_status,
                 "verdict": verdict,

@@ -29,6 +29,7 @@ class SnifferService:
         
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._local_ips: set = {"127.0.0.1", "::1"}
 
     def get_status(self) -> Dict[str, Any]:
         """Returns the current state and diagnostics of the monitoring service."""
@@ -126,6 +127,13 @@ class SnifferService:
         self.start_time = time.time()
         self.error_message = None
 
+        # Refresh host local IP set so outbound OS/browser traffic is not mistaken for inbound scans
+        local_ips = {"127.0.0.1", "::1"}
+        for iface in self.list_interfaces():
+            for ip in iface.get("all_ips", []):
+                local_ips.add(ip)
+        self._local_ips = local_ips
+
         self._thread = threading.Thread(
             target=self._sniff_worker,
             args=(interface_name, filter_str),
@@ -175,7 +183,13 @@ class SnifferService:
                 return
 
             tcp_layer = packet.getlayer(TCP)
-            
+            flags = str(tcp_layer.flags) # e.g. "S" (SYN), "SA", "A", "R" (RST)
+
+            # Focus exclusively on new connection attempts / port scan probes (SYN without ACK, FIN/NULL/XMAS)
+            # Ignore established ACK / SYN-ACK / RST return traffic from remote servers to ephemeral browser ports
+            if "A" in flags or "R" in flags:
+                return
+
             # Extract IPs
             src_ip = None
             dst_ip = "127.0.0.1"
@@ -189,8 +203,11 @@ class SnifferService:
             if not src_ip:
                 return
 
+            # Ignore outbound connections initiated by this host to external servers
+            if src_ip in self._local_ips and dst_ip not in self._local_ips:
+                return
+
             dst_port = int(tcp_layer.dport)
-            flags = str(tcp_layer.flags) # e.g. "S" (SYN), "SA", "A", "R" (RST)
             
             flag_labels = []
             if "S" in flags:

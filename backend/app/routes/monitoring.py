@@ -80,7 +80,8 @@ def get_client_device_info(request: Request) -> Dict[str, Any]:
         destination_ip="127.0.0.1",
         protocol="TCP",
         tcp_flags="SYN-ACK",
-        event_origin="live"
+        event_origin="live",
+        device_label=device_type
     )
 
     return {
@@ -109,7 +110,22 @@ def trigger_client_device_scan(request: Request) -> Dict[str, Any]:
     else:
         client_ip = request.client.host if request.client else "127.0.0.1"
 
-    ports_to_probe = [21, 22, 80, 443, 3389, 8080]
+    user_agent = request.headers.get("user-agent", "Unknown Device")
+    device_type = "Desktop Workstation"
+    if "iPhone" in user_agent:
+        device_type = "Apple iPhone"
+    elif "iPad" in user_agent:
+        device_type = "Apple iPad"
+    elif "Android" in user_agent:
+        device_type = "Android Smartphone"
+    elif "Macintosh" in user_agent:
+        device_type = "MacBook / macOS"
+    elif "Windows" in user_agent:
+        device_type = "Windows PC"
+    elif "Linux" in user_agent:
+        device_type = "Linux Workstation"
+
+    ports_to_probe = [21, 22, 23, 25, 80, 135, 139, 443, 445, 3306, 3389, 8080]
     results = []
 
     for port in ports_to_probe:
@@ -119,7 +135,8 @@ def trigger_client_device_scan(request: Request) -> Dict[str, Any]:
             destination_ip="127.0.0.1",
             protocol="TCP",
             tcp_flags="SYN",
-            event_origin="live"
+            event_origin="live",
+            device_label=device_type
         )
         results.append(res)
         time.sleep(0.04)

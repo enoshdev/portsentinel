@@ -51,6 +51,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
   const [telemetryWsStatus, setTelemetryWsStatus] = useState('disconnected');
   const [clientDevice, setClientDevice] = useState(null);
   const [isClientScanning, setIsClientScanning] = useState(false);
+  const [showSimTools, setShowSimTools] = useState(false);
 
   // Phase 3: Firewall & Mitigation State
   const [firewallStatus, setFirewallStatus] = useState({
@@ -224,18 +225,34 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             dstPort: tData.destination_port,
             protocol: tData.protocol || 'TCP',
             verdict: tData.verdict || 'Observed connection attempt',
-            status: tData.status || 'Normal'
+            status: tData.status || 'Normal',
+            score: tData.score
           };
 
           setPacketLogs((prev) => [newLog, ...prev.slice(0, 99)]);
+
+          // Update connected client device card if this event belongs to it
+          setClientDevice((prevClient) => {
+            if (prevClient && prevClient.client_ip === tData.source_ip) {
+              return {
+                ...prevClient,
+                risk_score: tData.score,
+                status: tData.status
+              };
+            }
+            return prevClient;
+          });
 
           // Update or add IP in monitored list
           setMonitoredIps((prevIps) => {
             const index = prevIps.findIndex((ip) => ip.ip === tData.source_ip);
             if (index >= 0) {
               const updated = [...prevIps];
+              const existingPorts = updated[index].portsProbed || [];
+              const nextPorts = tData.ports_probed || (existingPorts.includes(tData.destination_port) ? existingPorts : [...existingPorts, tData.destination_port]);
               updated[index] = {
                 ...updated[index],
+                label: tData.label || updated[index].label,
                 score: tData.score,
                 status: tData.status,
                 randomness: tData.signals?.diversity ?? updated[index].randomness,
@@ -243,16 +260,17 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 target: tData.signals?.target ?? updated[index].target,
                 unique_ports_count: tData.signals?.unique_ports ?? updated[index].unique_ports_count,
                 repeated_attempts_count: tData.signals?.repeated_attempts ?? updated[index].repeated_attempts_count,
+                portsProbed: nextPorts,
                 description: tData.verdict || updated[index].description,
                 lastSeen: new Date().toLocaleTimeString()
               };
               return updated;
             } else {
               const newHost = {
-                id: `host-${tData.source_ip.replace(/\./g, '-')}`,
+                id: `host-${tData.source_ip.replace(/\./g, '-').replace(/:/g, '-')}`,
                 ip: tData.source_ip,
-                label: 'Live Monitored Endpoint',
-                type: 'Discovered Host',
+                label: tData.label || 'Live Monitored Endpoint',
+                type: tData.label || 'Discovered Host',
                 description: tData.verdict,
                 score: tData.score,
                 status: tData.status,
@@ -261,11 +279,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 target: tData.signals?.target || 0,
                 unique_ports_count: tData.signals?.unique_ports || 1,
                 repeated_attempts_count: tData.signals?.repeated_attempts || 0,
-                portsProbed: [tData.destination_port],
+                portsProbed: tData.ports_probed || [tData.destination_port],
                 lastSeen: new Date().toLocaleTimeString(),
                 timelineData: []
               };
-              return [...prevIps, newHost];
+              return [newHost, ...prevIps];
             }
           });
         } else if (telemetry.event_type === 'monitoring_status') {
@@ -988,7 +1006,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             </div>
           </div>
 
-          {/* Row 2: Traffic Simulation & Testing Suite */}
+          {/* Row 2: Compact Simulation Toggle + Firewall Enforcement Controls */}
           <div
             style={{
               borderTop: '1px solid var(--hairline)',
@@ -1002,11 +1020,20 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>
-                TRAFFIC BENCHMARK SUITE:
+                SIMULATION & BENCHMARK SUITE:
               </span>
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon={showSimTools ? 'expand_less' : 'expand_more'}
+                onClick={() => setShowSimTools((prev) => !prev)}
+              >
+                {showSimTools ? 'Hide Simulation Tools' : 'Show Simulation Tools'}
+              </Button>
             </div>
 
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {showSimTools && (
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', width: '100%' }}>
               <Button
                 variant="tertiary"
                 size="sm"
@@ -1062,6 +1089,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 Replay PCAP File
               </Button>
             </div>
+            )}
           </div>
 
           {/* Row 3: Firewall Enforcement & Automated Mitigation Controls */}
@@ -1240,7 +1268,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     {activeStats.scansDetected}
                   </span>
                   <span style={{ fontSize: '12px', color: 'var(--body)' }}>
-                    1 Fast · 1 Stealth
+                    {activeStats.scansDetected > 0 ? 'Active threats flagged' : 'No active scans'}
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--body)', marginTop: '4px' }}>
@@ -1268,8 +1296,8 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   <span style={{ fontSize: '26px', fontWeight: 600, color: 'var(--ink)' }}>
                     {activeStats.ipsBlocked}
                   </span>
-                  <span style={{ fontSize: '12px', color: 'var(--error)' }}>
-                    Demonstration Rules
+                  <span style={{ fontSize: '12px', color: activeStats.ipsBlocked > 0 ? 'var(--error)' : 'var(--mute)' }}>
+                    {activeStats.ipsBlocked > 0 ? 'Firewall rules enforced' : 'No blocked hosts'}
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--body)', marginTop: '4px' }}>
@@ -1308,7 +1336,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             </div>
 
             {/* Main Section: Threat Activity Chart */}
-            <ThreatActivityChart />
+            <ThreatActivityChart packetLogs={packetLogs} monitoredIps={monitoredIps} />
 
             {/* Monitored IPs Compact Table */}
             <div
@@ -1331,10 +1359,10 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               >
                 <div>
                   <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--ink)', margin: 0 }}>
-                    Monitored IP Addresses
+                    Connected Devices & Monitored IPs
                   </h3>
                   <p style={{ fontSize: '12px', color: 'var(--mute)', margin: '2px 0 0 0' }}>
-                    Click "Investigate" on any IP to open its detailed behavioral analysis and timeline.
+                    Shows every device accessing PortSentinel, which ports it connected to, and its live risk score.
                   </p>
                 </div>
                 <span
@@ -1348,7 +1376,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     border: '1px solid var(--hairline)'
                   }}
                 >
-                  {monitoredIps.length} endpoints tracked in SQLite
+                  {monitoredIps.length} devices tracked live
                 </span>
               </div>
 
@@ -1366,15 +1394,24 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                         letterSpacing: '0.4px'
                       }}
                     >
-                      <th style={{ padding: '10px 20px', width: '220px' }}>IP Address Making Connection</th>
-                      <th style={{ padding: '10px 16px', width: '240px' }}>Suspicious Activity Score</th>
-                      <th style={{ padding: '10px 16px', width: '160px' }}>Status</th>
+                      <th style={{ padding: '10px 20px' }}>Device & IP Address</th>
+                      <th style={{ padding: '10px 16px' }}>Ports Accessed</th>
+                      <th style={{ padding: '10px 16px', width: '210px' }}>Risk Score</th>
+                      <th style={{ padding: '10px 16px', width: '150px' }}>Status</th>
                       <th style={{ padding: '10px 20px', textAlign: 'right' }}>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {monitoredIps.map((item) => {
+                    {monitoredIps.length === 0 ? (
+                      <tr>
+                        <td colSpan="5" style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--mute)', fontSize: '13px' }}>
+                          No devices tracked yet. Open the live URL on your phone or start live network capture to see real-time connections.
+                        </td>
+                      </tr>
+                    ) : (
+                    monitoredIps.map((item) => {
                       const isHighRisk = item.score >= 80;
+                      const ports = item.portsProbed || [];
                       return (
                         <tr
                           key={item.id}
@@ -1386,22 +1423,49 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
                         >
                           <td style={{ padding: '12px 20px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', fontWeight: 600, color: 'var(--ink)' }}>
                                 {item.ip}
                               </span>
                               <span
                                 style={{
                                   fontSize: '11px',
-                                  color: 'var(--mute)',
+                                  color: 'var(--ink)',
                                   backgroundColor: 'var(--canvas)',
                                   padding: '1px 6px',
                                   borderRadius: 'var(--rounded-sm)',
-                                  border: '1px solid var(--hairline)'
+                                  border: '1px solid var(--hairline)',
+                                  fontWeight: 500
                                 }}
                               >
                                 {item.label}
                               </span>
+                            </div>
+                          </td>
+
+                          <td style={{ padding: '12px 16px' }}>
+                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                              {ports.slice(0, 6).map((p) => (
+                                <span
+                                  key={p}
+                                  style={{
+                                    fontFamily: 'var(--font-mono)',
+                                    fontSize: '11px',
+                                    color: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-deep)' : 'var(--ink)',
+                                    backgroundColor: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-soft)' : 'var(--canvas)',
+                                    border: '1px solid var(--hairline)',
+                                    padding: '1px 6px',
+                                    borderRadius: '3px'
+                                  }}
+                                >
+                                  {p} ({getPortService(p)})
+                                </span>
+                              ))}
+                              {ports.length > 6 && (
+                                <span style={{ fontSize: '11px', color: 'var(--mute)', fontFamily: 'var(--font-mono)' }}>
+                                  +{ports.length - 6} more
+                                </span>
+                              )}
                             </div>
                           </td>
 
@@ -1418,7 +1482,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                               >
                                 {item.score}/100
                               </span>
-                              <div style={{ flex: 1, maxWidth: '140px' }}>
+                              <div style={{ flex: 1, maxWidth: '120px' }}>
                                 <ScoreBar score={item.score} showLabels={false} height={5} />
                               </div>
                             </div>
@@ -1440,7 +1504,8 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           </td>
                         </tr>
                       );
-                    })}
+                    })
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -1552,7 +1617,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   manage_search
                 </span>
                 <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ink)' }}>
-                  Select Demonstration Scenario:
+                  Select Connected Device / IP:
                 </span>
               </div>
 
