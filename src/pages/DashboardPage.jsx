@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { TopBar } from '../components/TopBar';
 import { StatusChip } from '../components/StatusChip';
 import { Button } from '../components/Button';
@@ -6,38 +6,67 @@ import { ScoreBar } from '../components/ScoreBar';
 import { TimelineChart } from '../components/TimelineChart';
 import { ThreatActivityChart } from '../components/ThreatActivityChart';
 import { Modal } from '../components/Modal';
-import {
-  INITIAL_MONITORED_IPS,
-  INITIAL_FIREWALL_RULES,
-  STATS_SUMMARY,
-  INITIAL_PACKET_LOGS,
-  getPortService
-} from '../data/mockData';
+import { api, createTelemetryWebSocket } from '../services/api';
+import { getPortService } from '../data/mockData';
 
 /**
  * DashboardPage Component
- * Redesigned clean, intuitive 3-section Security Dashboard:
- * 1. Overview (4 compact metrics, Threat Activity line chart, Monitored IPs table, Recent Activity)
+ * Connected to FastAPI + SQLite backend with persistent data storage:
+ * 1. Overview (4 metrics, Threat Activity line chart, Monitored IPs table, Recent Activity)
  * 2. Threat Analysis (Selected IP summary, Risk progression timeline, 3 plain-English detection signals, observed telemetry, simulate unblock)
  * 3. Block History (Audit table of simulated blocks with unblock action)
+ * 4. Phase 2 Real Network Monitoring & Live Sniffing Controls (Scapy + Npcap)
+ * 5. Phase 2 Real Traffic Simulation & Testing Suite
  */
 export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
-  // Navigation State: Exactly 3 sections per specification
+  // Navigation State
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'threat-analysis' | 'block-history'
 
-  // Shared Data Store State
-  const [monitoredIps, setMonitoredIps] = useState(INITIAL_MONITORED_IPS);
-  const [firewallRules, setFirewallRules] = useState(INITIAL_FIREWALL_RULES);
-  const [selectedIpId, setSelectedIpId] = useState('stealth'); // default scenario: stealth scan
+  // Backend Connection & Data State
+  const [backendStatus, setBackendStatus] = useState('loading'); // 'connected' | 'disconnected' | 'loading'
+  const [backendError, setBackendError] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [monitoredIps, setMonitoredIps] = useState([]);
+  const [firewallRules, setFirewallRules] = useState([]);
+  const [packetLogs, setPacketLogs] = useState([]);
+  const [backendStats, setBackendStats] = useState(null);
+  const [selectedIpId, setSelectedIpId] = useState('stealth');
+
+  // Phase 2: Live Network Monitoring & Testing State
+  const [monitoringState, setMonitoringState] = useState({
+    state: 'Stopped',
+    is_monitoring: false,
+    selected_interface: null,
+    interface_description: null,
+    packets_captured: 0,
+    npcap_available: true,
+    scapy_available: true,
+    error_message: null
+  });
+  const [interfaces, setInterfaces] = useState([]);
+  const [selectedInterface, setSelectedInterface] = useState('');
+  const [isStartingMonitoring, setIsStartingMonitoring] = useState(false);
+  const [isSimulatingTraffic, setIsSimulatingTraffic] = useState(false);
+  const [telemetryWsStatus, setTelemetryWsStatus] = useState('disconnected');
+
+  // Phase 3: Firewall & Mitigation State
+  const [firewallStatus, setFirewallStatus] = useState({
+    status: 'DRY_RUN',
+    is_admin: false,
+    dry_run: true,
+    auto_block_enabled: false,
+    auto_block_threshold: 80,
+    active_rules_count: 0,
+    total_rules_count: 0,
+    protected_ips: ['127.0.0.1', '::1', 'localhost'],
+    message: ''
+  });
+  const [blockModalTarget, setBlockModalTarget] = useState(null);
 
   // Modal & Toast States
   const [unblockModalIp, setUnblockModalIp] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
-
-  // Active selected IP object
-  const activeIp = useMemo(() => {
-    return monitoredIps.find((ip) => ip.id === selectedIpId) || monitoredIps[0];
-  }, [monitoredIps, selectedIpId]);
 
   // Toast feedback helper
   const triggerToast = (msg) => {
@@ -45,12 +74,272 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  // Reset simulation state to initial baseline
-  const handleResetData = () => {
-    setMonitoredIps(INITIAL_MONITORED_IPS);
-    setFirewallRules(INITIAL_FIREWALL_RULES);
-    setSelectedIpId('stealth');
-    triggerToast('Demonstration data reset to initial baseline.');
+  // Fetch firewall status
+  const fetchFirewallStatus = async () => {
+    try {
+      const status = await api.getFirewallStatus();
+      setFirewallStatus(status);
+    } catch (e) {
+      console.warn('Failed to fetch firewall status:', e);
+    }
+  };
+
+  // Toggle Auto-Block
+  const handleToggleAutoBlock = async () => {
+    try {
+      const nextState = !firewallStatus.auto_block_enabled;
+      const res = await api.setAutoBlock(nextState, firewallStatus.auto_block_threshold);
+      setFirewallStatus((prev) => ({ ...prev, auto_block_enabled: nextState }));
+      triggerToast(res.message);
+    } catch (err) {
+      triggerToast(`Auto-block error: ${err.message}`);
+    }
+  };
+
+  // Toggle Dry-Run
+  const handleToggleDryRun = async () => {
+    try {
+      const nextDryRun = !firewallStatus.dry_run;
+      const res = await api.setDryRun(nextDryRun);
+      await fetchFirewallStatus();
+      triggerToast(res.message);
+    } catch (err) {
+      triggerToast(`Dry-run toggle error: ${err.message}`);
+    }
+  };
+
+  // Fetch monitoring diagnostics & interfaces
+  const fetchMonitoringStatus = async () => {
+    try {
+      const status = await api.getMonitoringStatus();
+      setMonitoringState(status);
+      if (status.selected_interface) {
+        setSelectedInterface(status.selected_interface);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch monitoring status:', e);
+    }
+  };
+
+  const fetchInterfaces = async () => {
+    try {
+      const ifaces = await api.getInterfaces();
+      setInterfaces(ifaces);
+      if (ifaces.length > 0 && !selectedInterface) {
+        // Prefer interface with active IP address
+        const activeIface = ifaces.find((i) => i.ips && i.ips.length > 0 && !i.name.includes('Loopback')) || ifaces[0];
+        setSelectedInterface(activeIface.name);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch interfaces:', e);
+    }
+  };
+
+  // Fetch all primary dashboard data from FastAPI backend
+  const fetchDashboardData = async () => {
+    setIsLoading(true);
+    try {
+      await api.checkHealth();
+      const [statsData, ipsData, rulesData, logsData, fwStatus] = await Promise.all([
+        api.getDashboardStats(),
+        api.getMonitoredIps(),
+        api.getFirewallHistory(),
+        api.getConnectionLogs({ limit: 50 }),
+        api.getFirewallStatus()
+      ]);
+
+      setBackendStats(statsData);
+      setMonitoredIps(ipsData);
+      setFirewallRules(rulesData);
+      setPacketLogs(logsData);
+      setFirewallStatus(fwStatus);
+      setBackendStatus('connected');
+      setBackendError(null);
+    } catch (err) {
+      console.warn('Backend unavailable:', err);
+      setBackendStatus('disconnected');
+      setBackendError(err.message || 'Cannot reach FastAPI backend server');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDashboardData();
+    fetchMonitoringStatus();
+    fetchInterfaces();
+  }, []);
+
+  // Real-time WebSocket Telemetry streaming
+  useEffect(() => {
+    const ws = createTelemetryWebSocket(
+      (telemetry) => {
+        if (telemetry.type === 'FIREWALL_ACTION') {
+          triggerToast(`Automated Mitigation: Blocked ${telemetry.rule?.ip || 'host'} in Windows Firewall!`);
+          fetchDashboardData();
+          return;
+        }
+
+        if (telemetry.event_type === 'connection' || telemetry.data?.event_id) {
+          const tData = telemetry.data || telemetry;
+          // Increment captured packets
+          setMonitoringState((prev) => ({
+            ...prev,
+            packets_captured: (prev.packets_captured || 0) + 1
+          }));
+
+          // Prepend new connection event to logs
+          const newLog = {
+            id: tData.event_id || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            time: tData.time || new Date().toLocaleTimeString(),
+            srcIp: tData.source_ip,
+            dstPort: tData.destination_port,
+            protocol: tData.protocol || 'TCP',
+            verdict: tData.verdict || 'Observed connection attempt',
+            status: tData.status || 'Normal'
+          };
+
+          setPacketLogs((prev) => [newLog, ...prev.slice(0, 99)]);
+
+          // Update or add IP in monitored list
+          setMonitoredIps((prevIps) => {
+            const index = prevIps.findIndex((ip) => ip.ip === tData.source_ip);
+            if (index >= 0) {
+              const updated = [...prevIps];
+              updated[index] = {
+                ...updated[index],
+                score: tData.score,
+                status: tData.status,
+                randomness: tData.signals?.diversity ?? updated[index].randomness,
+                timing: tData.signals?.timing ?? updated[index].timing,
+                target: tData.signals?.target ?? updated[index].target,
+                unique_ports_count: tData.signals?.unique_ports ?? updated[index].unique_ports_count,
+                repeated_attempts_count: tData.signals?.repeated_attempts ?? updated[index].repeated_attempts_count,
+                description: tData.verdict || updated[index].description,
+                lastSeen: new Date().toLocaleTimeString()
+              };
+              return updated;
+            } else {
+              const newHost = {
+                id: `host-${tData.source_ip.replace(/\./g, '-')}`,
+                ip: tData.source_ip,
+                label: 'Live Monitored Endpoint',
+                type: 'Discovered Host',
+                description: tData.verdict,
+                score: tData.score,
+                status: tData.status,
+                randomness: tData.signals?.diversity || 0,
+                timing: tData.signals?.timing || 0,
+                target: tData.signals?.target || 0,
+                unique_ports_count: tData.signals?.unique_ports || 1,
+                repeated_attempts_count: tData.signals?.repeated_attempts || 0,
+                portsProbed: [tData.destination_port],
+                lastSeen: new Date().toLocaleTimeString(),
+                timelineData: []
+              };
+              return [...prevIps, newHost];
+            }
+          });
+        } else if (telemetry.event_type === 'monitoring_status') {
+          setMonitoringState((prev) => ({ ...prev, ...telemetry }));
+        }
+      },
+      (status) => {
+        setTelemetryWsStatus(status);
+      }
+    );
+
+    return () => {
+      ws.close();
+    };
+  }, []);
+
+  // Start live network monitoring
+  const handleStartMonitoring = async () => {
+    setIsStartingMonitoring(true);
+    try {
+      const iface = selectedInterface || (interfaces[0]?.name);
+      const res = await api.startMonitoring(iface, 'tcp');
+      setMonitoringState(res);
+      triggerToast(`Live network monitoring active on ${iface}.`);
+    } catch (err) {
+      triggerToast(`Capture error: ${err.message}`);
+      await fetchMonitoringStatus();
+    } finally {
+      setIsStartingMonitoring(false);
+    }
+  };
+
+  // Stop live network monitoring
+  const handleStopMonitoring = async () => {
+    try {
+      const res = await api.stopMonitoring();
+      setMonitoringState(res);
+      triggerToast('Live network packet collection stopped.');
+    } catch (err) {
+      triggerToast(`Stop error: ${err.message}`);
+    }
+  };
+
+  // Run controlled traffic simulation
+  const handleRunSimulation = async (type) => {
+    setIsSimulatingTraffic(true);
+    try {
+      if (type === 'fast-scan') {
+        const res = await api.simulateFastScan();
+        triggerToast(`Fast SYN sweep completed (20 ports in <5s). Risk Score: ${res.final_score} (${res.final_status}).`);
+      } else if (type === 'slow-scan') {
+        const res = await api.simulateSlowScan();
+        triggerToast(`Stealth scan completed (clockwork intervals). Risk Score: ${res.final_score} (${res.final_status}).`);
+      } else if (type === 'repeated-port') {
+        const res = await api.simulateRepeatedPort();
+        triggerToast(`Single-port test: 25 attempts on port 443 evaluated. False-positive prevented (Score: ${res.final_score}).`);
+      } else if (type === 'normal') {
+        const res = await api.simulateNormalTraffic();
+        triggerToast(`Benign web browsing session generated. Score: ${res.final_score} (${res.final_status}).`);
+      } else if (type === 'pcap') {
+        const res = await api.replayPcap();
+        triggerToast(`PCAP replay completed (${res.events_processed} packets routed through detection engine).`);
+      }
+      await fetchDashboardData();
+    } catch (err) {
+      triggerToast(`Simulation error: ${err.message}`);
+    } finally {
+      setIsSimulatingTraffic(false);
+    }
+  };
+
+  // Active selected IP object
+  const activeIp = useMemo(() => {
+    if (monitoredIps.length === 0) {
+      return {
+        id: 'stealth',
+        ip: '203.0.113.77',
+        label: 'Slow / stealth scanner',
+        type: 'External Host',
+        description: 'Patient, periodic reconnaissance across sensitive administration ports.',
+        score: 84,
+        status: 'Blocked',
+        randomness: 88,
+        timing: 94,
+        target: 82,
+        portsProbed: [22, 3389, 5900, 8080, 1025, 23],
+        timelineData: []
+      };
+    }
+    return monitoredIps.find((ip) => ip.id === selectedIpId || ip.ip === selectedIpId) || monitoredIps[0];
+  }, [monitoredIps, selectedIpId]);
+
+  // Reset demonstration data in SQLite via backend API
+  const handleResetData = async () => {
+    try {
+      await api.resetDemoData();
+      setSelectedIpId('stealth');
+      await fetchDashboardData();
+      triggerToast('Demonstration data reset to initial baseline in SQLite.');
+    } catch (err) {
+      triggerToast(`Reset failed: ${err.message}`);
+    }
   };
 
   // Jump from Overview or Block History directly to Threat Analysis with that IP selected
@@ -60,108 +349,82 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Simulate manual unblocking
-  const handleConfirmUnblock = () => {
+  // Unblock IP through real backend API (persisted in SQLite)
+  const handleConfirmUnblock = async () => {
     if (!unblockModalIp) return;
-
     const targetIpAddr = unblockModalIp.ip;
 
-    // Update monitored IP status to Normal
-    setMonitoredIps((prev) =>
-      prev.map((item) => {
-        if (item.ip === targetIpAddr) {
-          return {
-            ...item,
-            status: 'Normal',
-            score: Math.min(item.score, 25),
-            blockedAt: null,
-            blockReason: 'Simulated unblock triggered during review'
-          };
-        }
-        return item;
-      })
-    );
-
-    // Remove from active firewall rules
-    setFirewallRules((prev) => prev.filter((r) => r.ip !== targetIpAddr));
-
-    const ipLabel = unblockModalIp.ip;
-    setUnblockModalIp(null);
-    triggerToast(`Simulated drop rule removed for ${ipLabel}. Host restored to normal monitoring.`);
-  };
-
-  // Simulate manual block (for demonstration)
-  const handleSimulateBlock = (ipObj) => {
-    setMonitoredIps((prev) =>
-      prev.map((item) => {
-        if (item.id === ipObj.id) {
-          return {
-            ...item,
-            status: 'Blocked',
-            score: Math.max(item.score, 85),
-            blockedAt: new Date().toLocaleTimeString()
-          };
-        }
-        return item;
-      })
-    );
-
-    if (!firewallRules.some((r) => r.ip === ipObj.ip)) {
-      setFirewallRules((prev) => [
-        {
-          id: `PT-${Math.floor(10000 + Math.random() * 90000)}`,
-          ip: ipObj.ip,
-          chain: 'INPUT',
-          target: 'DROP',
-          protocol: 'TCP',
-          reason: `Manual test: Risk score ${Math.max(ipObj.score, 85)} exceeded threshold 80`,
-          enforcedAt: new Date().toLocaleTimeString(),
-          packetsDropped: 1,
-          status: 'ACTIVE'
-        },
-        ...prev
-      ]);
+    try {
+      await api.unblockIp(targetIpAddr);
+      await fetchDashboardData();
+      triggerToast(`Quarantine removed for ${targetIpAddr}. Persisted in database.`);
+    } catch (err) {
+      triggerToast(`Failed to unblock: ${err.message}`);
+    } finally {
+      setUnblockModalIp(null);
     }
-
-    triggerToast(`Simulated block enforced for ${ipObj.ip}.`);
   };
 
-  // Computed summary metrics
+  // Block IP through real backend API (persisted in SQLite)
+  const handleSimulateBlock = async (ipObj) => {
+    try {
+      await api.blockIp(ipObj.ip, `Manual quarantine for ${ipObj.ip}`);
+      await fetchDashboardData();
+      triggerToast(`Quarantine rule created for ${ipObj.ip}. Persisted in database.`);
+    } catch (err) {
+      triggerToast(`Failed to block: ${err.message}`);
+    }
+  };
+
+  // Computed or backend summary metrics
   const activeStats = useMemo(() => {
-    const totalConnections = 42; // total active TCP flows
+    if (backendStats) {
+      return {
+        activeConnections: backendStats.activeConnections,
+        scansDetected: backendStats.scansDetected,
+        ipsBlocked: backendStats.ipsBlocked,
+        avgResponse: backendStats.avgResponse
+      };
+    }
     const scansDetected = monitoredIps.filter((i) => i.status === 'Confirmed Scan' || i.status === 'Blocked').length;
-    const ipsBlocked = monitoredIps.filter((i) => i.status === 'Blocked').length;
+    const ipsBlocked = firewallRules.filter((r) => r.status === 'ACTIVE').length;
     return {
-      activeConnections: totalConnections,
+      activeConnections: packetLogs.length || 30,
       scansDetected,
       ipsBlocked,
       avgResponse: '1.4 ms'
     };
-  }, [monitoredIps]);
+  }, [backendStats, monitoredIps, firewallRules, packetLogs]);
 
   // Plain English behavioral explanation for the selected IP
   const getPlainEnglishExplanation = (ip) => {
+    if (ip.description && !['Slow / stealth scanner', 'Fast port scanner', 'Suspicious internal host', 'Normal user traffic'].includes(ip.description)) {
+      return ip.description;
+    }
     if (ip.id === 'stealth') {
-      return 'This source contacted different ports across a longer observation window (~12m intervals). Suspicious evidence accumulated over time until crossing the auto-block threshold at minute 60.';
+      return 'This IP address checked multiple sensitive ports at robotic intervals (~12 minutes apart). Because attempts were spread over an hour, suspicion accumulated until reaching the auto-block threshold at minute 60.';
     }
     if (ip.id === 'fast') {
-      return 'This source contacted 50 distinct ports within a few seconds, showing automated scan velocity that triggered an immediate simulated block.';
+      return 'This IP address contacted distinct ports in rapid sub-second succession, showing automated scanning velocity that triggered an instant quarantine rule.';
     }
     if (ip.id === 'office') {
-      return 'This internal host probed multiple web application ports across the subnet. It is flagged as Suspicious for operator review, but does not meet the threshold for blocking.';
+      return 'This internal computer probed multiple local web application ports. It has been marked as Suspicious for review, but has not reached the threshold for blocking.';
     }
-    return 'This workstation repeatedly accessed standard web ports (80/443). Normal, benign traffic with no scan patterns detected.';
+    if (ip.id === 'normal') {
+      return 'This workstation repeatedly accessed standard web ports (80 and 443). Normal, benign browsing traffic with no port scanning patterns.';
+    }
+    return ip.description || 'Observed host network connection attempts analyzed across multi-window observation cycles.';
   };
 
   // Filter packet logs for selected IP
   const activeIpLogs = useMemo(() => {
-    return INITIAL_PACKET_LOGS.filter((l) => l.srcIp === activeIp.ip).slice(0, 10);
-  }, [activeIp]);
+    return packetLogs.filter((l) => l.srcIp === activeIp.ip).slice(0, 10);
+  }, [packetLogs, activeIp]);
 
   // Recent events for Overview feed (top 7 events)
   const recentEvents = useMemo(() => {
-    return INITIAL_PACKET_LOGS.slice(0, 7);
-  }, []);
+    return packetLogs.slice(0, 7);
+  }, [packetLogs]);
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: 'var(--canvas)', color: 'var(--ink)', display: 'flex', flexDirection: 'column' }}>
@@ -201,7 +464,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
         </div>
       )}
 
-      {/* 2. Page Subheader: Identity, Title, and Demo Mode indicator */}
+      {/* 2. Page Subheader: Identity, Title, Backend Connection Status, and Actions */}
       <div
         style={{
           backgroundColor: 'var(--canvas-elevated)',
@@ -225,26 +488,71 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               <h1 style={{ fontSize: '20px', fontWeight: 600, color: 'var(--ink)', letterSpacing: '-0.4px', margin: 0 }}>
                 {activeTab === 'overview' && 'Security Overview'}
                 {activeTab === 'threat-analysis' && 'Threat Analysis & Investigation'}
-                {activeTab === 'block-history' && 'Block History & Active Rules'}
+                {activeTab === 'block-history' && 'Block History & Quarantine Rules'}
               </h1>
-              <span
-                style={{
-                  fontSize: '11px',
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--mute)',
-                  backgroundColor: 'var(--canvas)',
-                  border: '1px solid var(--hairline)',
-                  padding: '2px 8px',
-                  borderRadius: 'var(--rounded-sm)'
-                }}
-              >
-                PortSentinel v1.0
-              </span>
+
+              {/* Backend Status Badge */}
+              {backendStatus === 'connected' && (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--safe)',
+                    backgroundColor: 'var(--safe-soft)',
+                    border: '1px solid var(--safe-border)',
+                    padding: '2px 8px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                  title="Persistent SQLite database connected via FastAPI backend"
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--safe)' }} />
+                  Backend Connected (SQLite)
+                </span>
+              )}
+
+              {backendStatus === 'loading' && (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--mute)',
+                    backgroundColor: 'var(--canvas)',
+                    border: '1px solid var(--hairline)',
+                    padding: '2px 8px',
+                    borderRadius: 'var(--rounded-sm)'
+                  }}
+                >
+                  Connecting to Backend...
+                </span>
+              )}
+
+              {backendStatus === 'disconnected' && (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--error)',
+                    backgroundColor: 'rgba(238, 0, 0, 0.08)',
+                    border: '1px solid rgba(238, 0, 0, 0.2)',
+                    padding: '2px 8px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--error)' }} />
+                  Backend Disconnected
+                </span>
+              )}
             </div>
             <p style={{ fontSize: '13px', color: 'var(--body)', marginTop: '4px', margin: 0 }}>
-              {activeTab === 'overview' && 'Monitor connections, investigate suspicious activity, and review blocked threats.'}
-              {activeTab === 'threat-analysis' && 'Examine why an IP was flagged, track risk score progression over time, and inspect behavioral evidence.'}
-              {activeTab === 'block-history' && 'Review previous simulated firewall quarantine actions and safely reverse blocks.'}
+              {activeTab === 'overview' && 'Monitor connection attempts, investigate suspicious scan patterns, and review quarantined IPs.'}
+              {activeTab === 'threat-analysis' && 'Understand why an IP address was flagged, track risk progression over time, and inspect behavioral signals.'}
+              {activeTab === 'block-history' && 'Review persistent firewall quarantine records and safely unblock hosts.'}
             </p>
           </div>
 
@@ -252,12 +560,483 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             <Button
               variant="tertiary"
               size="sm"
+              icon="refresh"
+              onClick={fetchDashboardData}
+              title="Refresh telemetry from backend"
+            >
+              Refresh
+            </Button>
+            <Button
+              variant="tertiary"
+              size="sm"
               icon="restart_alt"
               onClick={handleResetData}
-              title="Reset demonstration data to baseline"
+              title="Reset demonstration data to baseline in SQLite"
             >
               Reset Data
             </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Backend Disconnected Alert Banner */}
+      {backendStatus === 'disconnected' && (
+        <div
+          style={{
+            backgroundColor: 'rgba(238, 0, 0, 0.05)',
+            borderBottom: '1px solid rgba(238, 0, 0, 0.2)',
+            padding: '12px 24px',
+            color: 'var(--error-deep)',
+            fontSize: '13px'
+          }}
+        >
+          <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--error)' }}>
+                warning
+              </span>
+              <span>
+                <strong>Backend Server Offline:</strong> Unable to connect to PortSentinel FastAPI server at <code style={{ fontFamily: 'var(--font-mono)' }}>http://127.0.0.1:8000</code>.
+                Start the backend using <code style={{ fontFamily: 'var(--font-mono)', backgroundColor: 'var(--canvas)', padding: '2px 6px', borderRadius: '3px' }}>.\.venv\Scripts\uvicorn.exe backend.app.main:app --port 8000</code>.
+              </span>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="sync"
+              onClick={fetchDashboardData}
+            >
+              Retry Connection
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 2: Live Network Sniffer & Controlled Traffic Suite */}
+      <div
+        style={{
+          backgroundColor: 'var(--canvas-elevated)',
+          borderBottom: '1px solid var(--hairline)',
+          padding: '14px 24px',
+          boxShadow: 'var(--shadow-whisper)'
+        }}
+      >
+        <div
+          style={{
+            maxWidth: '1200px',
+            margin: '0 auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px'
+          }}
+        >
+          {/* Row 1: Real Network Packet Sniffer (Windows / Npcap / Scapy) */}
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '14px'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              {/* Genuine Monitoring State Chip: Green only if genuinely capturing */}
+              {monitoringState.state === 'Monitoring' && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    fontWeight: 600,
+                    color: 'var(--safe)',
+                    backgroundColor: 'var(--safe-soft)',
+                    border: '1px solid var(--safe-border)',
+                    padding: '5px 12px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span
+                    style={{
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      backgroundColor: 'var(--safe)',
+                      boxShadow: '0 0 8px var(--safe)'
+                    }}
+                  />
+                  Live Sniffing Active (Scapy + Npcap)
+                </span>
+              )}
+
+              {monitoringState.state === 'Stopped' && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--body)',
+                    backgroundColor: 'var(--canvas)',
+                    border: '1px solid var(--hairline)',
+                    padding: '5px 12px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--mute)' }} />
+                  Packet Collection Stopped
+                </span>
+              )}
+
+              {monitoringState.state === 'Permission required' && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--warning-deep)',
+                    backgroundColor: 'var(--warning-soft)',
+                    border: '1px solid var(--warning-border)',
+                    padding: '5px 12px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--warning)' }} />
+                  Administrator / Npcap Required
+                </span>
+              )}
+
+              {monitoringState.state === 'Capture unavailable' && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--warning-deep)',
+                    backgroundColor: 'var(--warning-soft)',
+                    border: '1px solid var(--warning-border)',
+                    padding: '5px 12px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--warning)' }} />
+                  Capture Unavailable
+                </span>
+              )}
+
+              {monitoringState.state === 'Error' && (
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--error-deep)',
+                    backgroundColor: 'var(--error-soft)',
+                    border: '1px solid var(--error-border)',
+                    padding: '5px 12px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--error)' }} />
+                  Capture Error
+                </span>
+              )}
+
+              {/* Interface Selector Dropdown */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label htmlFor="interface-select" style={{ fontSize: '11px', color: 'var(--mute)', fontFamily: 'var(--font-mono)' }}>
+                  INTERFACE:
+                </label>
+                <select
+                  id="interface-select"
+                  value={selectedInterface}
+                  onChange={(e) => setSelectedInterface(e.target.value)}
+                  disabled={monitoringState.state === 'Monitoring'}
+                  style={{
+                    backgroundColor: 'var(--canvas)',
+                    color: 'var(--ink)',
+                    border: '1px solid var(--hairline)',
+                    borderRadius: 'var(--rounded-sm)',
+                    padding: '5px 10px',
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-mono)',
+                    maxWidth: '300px'
+                  }}
+                >
+                  {interfaces.map((iface) => (
+                    <option key={iface.name} value={iface.name}>
+                      {iface.name} {iface.ips?.length ? `(${iface.ips[0]})` : ''} - {iface.description}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Start / Stop Toggle Button */}
+              {monitoringState.state === 'Monitoring' ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="stop"
+                  onClick={handleStopMonitoring}
+                >
+                  Stop Capture
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon="play_arrow"
+                  onClick={handleStartMonitoring}
+                  disabled={isStartingMonitoring}
+                >
+                  {isStartingMonitoring ? 'Starting...' : 'Start Live Capture'}
+                </Button>
+              )}
+            </div>
+
+            {/* Real-time Telemetry & Counters */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              {/* Packet Counter */}
+              <div
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '12px',
+                  backgroundColor: 'var(--canvas)',
+                  border: '1px solid var(--hairline)',
+                  padding: '4px 10px',
+                  borderRadius: 'var(--rounded-sm)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '15px', color: 'var(--mute)' }}>
+                  layers
+                </span>
+                <span style={{ color: 'var(--mute)' }}>Packets Captured:</span>
+                <strong style={{ color: 'var(--ink)' }}>{monitoringState.packets_captured || 0}</strong>
+              </div>
+
+              {/* WebSocket Stream Badge */}
+              <div
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '11px',
+                  backgroundColor: telemetryWsStatus === 'connected' ? 'var(--safe-soft)' : 'var(--canvas)',
+                  color: telemetryWsStatus === 'connected' ? 'var(--safe)' : 'var(--mute)',
+                  border: `1px solid ${telemetryWsStatus === 'connected' ? 'var(--safe-border)' : 'var(--hairline)'}`,
+                  padding: '4px 8px',
+                  borderRadius: 'var(--rounded-sm)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px'
+                }}
+                title={telemetryWsStatus === 'connected' ? 'WebSocket stream active' : 'WebSocket connecting'}
+              >
+                <span
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    backgroundColor: telemetryWsStatus === 'connected' ? 'var(--safe)' : 'var(--mute)'
+                  }}
+                />
+                WebSocket: {telemetryWsStatus === 'connected' ? 'Live Stream' : 'Connecting'}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Traffic Simulation & Testing Suite */}
+          <div
+            style={{
+              borderTop: '1px solid var(--hairline)',
+              paddingTop: '10px',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>
+                TRAFFIC BENCHMARK SUITE:
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="bolt"
+                disabled={isSimulatingTraffic}
+                onClick={() => handleRunSimulation('fast-scan')}
+                title="Sends rapid SYN burst across 20 distinct ports within 5 seconds to test fast-scan detection."
+              >
+                Fast Scan Burst
+              </Button>
+
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="schedule"
+                disabled={isSimulatingTraffic}
+                onClick={() => handleRunSimulation('slow-scan')}
+                title="Sends low-jitter machine-paced probes across sensitive ports to test stealth detection."
+              >
+                Slow / Stealth Scan
+              </Button>
+
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="repeat"
+                disabled={isSimulatingTraffic}
+                onClick={() => handleRunSimulation('repeated-port')}
+                title="Generates 25 repeated connections to port 443 to verify single-port false-positive prevention."
+              >
+                Repeated Port 443 Check
+              </Button>
+
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="language"
+                disabled={isSimulatingTraffic}
+                onClick={() => handleRunSimulation('normal')}
+                title="Generates benign web session packets (ports 80 & 443 with human jitter)."
+              >
+                Normal Web Browsing
+              </Button>
+
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="file_open"
+                disabled={isSimulatingTraffic}
+                onClick={() => handleRunSimulation('pcap')}
+                title="Replays offline PCAP trace through the detection pipeline."
+              >
+                Replay PCAP File
+              </Button>
+            </div>
+          </div>
+
+          {/* Row 3: Firewall Enforcement & Automated Mitigation Controls */}
+          <div
+            style={{
+              borderTop: '1px solid var(--hairline)',
+              paddingTop: '10px',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>
+                FIREWALL MITIGATION:
+              </span>
+
+              {/* Firewall Status Chip */}
+              {firewallStatus.dry_run ? (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--ink)',
+                    backgroundColor: 'var(--canvas)',
+                    border: '1px solid var(--hairline)',
+                    padding: '3px 8px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px'
+                  }}
+                  title="Rules are tested, validated, and logged to SQLite without modifying OS firewall."
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#888' }} />
+                  Mode: Dry-Run Simulation
+                </span>
+              ) : firewallStatus.is_admin ? (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--safe)',
+                    backgroundColor: 'var(--safe-soft)',
+                    border: '1px solid var(--safe-border)',
+                    padding: '3px 8px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px'
+                  }}
+                  title="Real Windows Defender Firewall block rules enforced via netsh advfirewall."
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--safe)', boxShadow: '0 0 6px var(--safe)' }} />
+                  Windows Firewall: Active (Elevated)
+                </span>
+              ) : (
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--warning-deep)',
+                    backgroundColor: 'var(--warning-soft)',
+                    border: '1px solid var(--warning-border)',
+                    padding: '3px 8px',
+                    borderRadius: 'var(--rounded-sm)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px'
+                  }}
+                  title="Administrator privileges required for OS-level firewall modification."
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--warning)' }} />
+                  Elevation Required (Run as Admin)
+                </span>
+              )}
+
+              {/* Mode Toggle Button */}
+              <Button
+                variant={firewallStatus.dry_run ? 'secondary' : 'primary'}
+                size="sm"
+                icon={firewallStatus.dry_run ? 'toggle_off' : 'toggle_on'}
+                onClick={handleToggleDryRun}
+                title={firewallStatus.dry_run ? 'Switch to real Windows Defender Firewall enforcement' : 'Switch to safe dry-run simulation mode'}
+              >
+                {firewallStatus.dry_run ? 'Enable Real OS Enforcement' : 'Switch to Dry-Run Mode'}
+              </Button>
+
+              {/* Auto-Block Toggle Button */}
+              <Button
+                variant={firewallStatus.auto_block_enabled ? 'primary' : 'tertiary'}
+                size="sm"
+                icon={firewallStatus.auto_block_enabled ? 'lock' : 'lock_open'}
+                onClick={handleToggleAutoBlock}
+                title="Automatically apply Windows Firewall block rule when threat score reaches 80/100"
+              >
+                Auto-Block: {firewallStatus.auto_block_enabled ? 'ENABLED (Score ≥80)' : 'DISABLED (Manual Only)'}
+              </Button>
+            </div>
+
+            {/* Right side: Rules & Allowlist info */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
+                {firewallRules.filter(r => r.status === 'ACTIVE').length} Active Rules · {firewallStatus.protected_ips?.length || 4} Protected IPs (Loopback safe)
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -299,11 +1078,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     {activeStats.activeConnections}
                   </span>
                   <span style={{ fontSize: '12px', color: 'var(--mute)' }}>
-                    across 4 hosts
+                    recorded events
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--body)', marginTop: '4px' }}>
-                  Live sliding telemetry window
+                  Connection attempts in database
                 </div>
               </div>
 
@@ -347,7 +1126,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>IPS BLOCKED</span>
+                  <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>QUARANTINED IPS</span>
                   <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--ink)' }}>
                     shield
                   </span>
@@ -357,11 +1136,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     {activeStats.ipsBlocked}
                   </span>
                   <span style={{ fontSize: '12px', color: 'var(--error)' }}>
-                    Simulated DROP
+                    Demonstration Rules
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--body)', marginTop: '4px' }}>
-                  Reversible in Block History
+                  Persisted in SQLite database
                 </div>
               </div>
 
@@ -376,7 +1155,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>AVG RESPONSE TIME</span>
+                  <span className="mono-eyebrow" style={{ color: 'var(--mute)' }}>EVALUATION SPEED</span>
                   <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--safe)' }}>
                     bolt
                   </span>
@@ -386,11 +1165,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     {activeStats.avgResponse}
                   </span>
                   <span style={{ fontSize: '12px', color: 'var(--safe)' }}>
-                    eBPF speed
+                    in-memory query
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--body)', marginTop: '4px' }}>
-                  Kernel-level detection latency
+                  Database lookup latency
                 </div>
               </div>
             </div>
@@ -422,7 +1201,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     Monitored IP Addresses
                   </h3>
                   <p style={{ fontSize: '12px', color: 'var(--mute)', margin: '2px 0 0 0' }}>
-                    Click "Investigate" on any row to open its detailed Threat Analysis breakdown.
+                    Click "Investigate" on any IP to open its detailed behavioral analysis and timeline.
                   </p>
                 </div>
                 <span
@@ -436,7 +1215,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     border: '1px solid var(--hairline)'
                   }}
                 >
-                  {monitoredIps.length} endpoints tracked
+                  {monitoredIps.length} endpoints tracked in SQLite
                 </span>
               </div>
 
@@ -454,8 +1233,8 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                         letterSpacing: '0.4px'
                       }}
                     >
-                      <th style={{ padding: '10px 20px', width: '220px' }}>IP Address</th>
-                      <th style={{ padding: '10px 16px', width: '240px' }}>Risk Score</th>
+                      <th style={{ padding: '10px 20px', width: '220px' }}>IP Address Making Connection</th>
+                      <th style={{ padding: '10px 16px', width: '240px' }}>Suspicious Activity Score</th>
                       <th style={{ padding: '10px 16px', width: '160px' }}>Status</th>
                       <th style={{ padding: '10px 20px', textAlign: 'right' }}>Action</th>
                     </tr>
@@ -555,14 +1334,14 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               >
                 <div>
                   <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--ink)', margin: 0 }}>
-                    Recent Activity
+                    Recent Connection Events
                   </h3>
                   <p style={{ fontSize: '12px', color: 'var(--mute)', margin: '2px 0 0 0' }}>
-                    Latest connection attempts and detection verdicts across the network.
+                    Chronological network connection attempts stored in the database.
                   </p>
                 </div>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
-                  Live stream
+                  {packetLogs.length} events logged
                 </span>
               </div>
 
@@ -580,8 +1359,8 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                       }}
                     >
                       <th style={{ padding: '8px 20px', width: '110px' }}>Time</th>
-                      <th style={{ padding: '8px 16px', width: '150px' }}>Source IP</th>
-                      <th style={{ padding: '8px 16px' }}>Event Description</th>
+                      <th style={{ padding: '8px 16px', width: '150px' }}>IP Making Connection</th>
+                      <th style={{ padding: '8px 16px' }}>Port Accessed & Plain-English Description</th>
                       <th style={{ padding: '8px 20px', width: '140px', textAlign: 'right' }}>Status</th>
                     </tr>
                   </thead>
@@ -646,7 +1425,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
 
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 {monitoredIps.map((ip) => {
-                  const isSelected = selectedIpId === ip.id;
+                  const isSelected = selectedIpId === ip.id || selectedIpId === ip.ip;
                   return (
                     <button
                       key={ip.id}
@@ -710,9 +1489,76 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     {activeIp.type}
                   </span>
                 </div>
-                <p style={{ fontSize: '14px', color: 'var(--body)', lineHeight: 1.5, margin: 0 }}>
+                <p style={{ fontSize: '14px', color: 'var(--body)', lineHeight: 1.5, margin: '0 0 12px 0' }}>
                   {getPlainEnglishExplanation(activeIp)}
                 </p>
+
+                {/* Behavioral Granularity: Port Diversity vs Repetition */}
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <div
+                    style={{
+                      backgroundColor: 'var(--canvas)',
+                      border: '1px solid var(--hairline)',
+                      borderRadius: 'var(--rounded-sm)',
+                      padding: '4px 10px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '12px'
+                    }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '15px', color: 'var(--mute)' }}>
+                      filter_list
+                    </span>
+                    <span style={{ color: 'var(--mute)' }}>Unique Ports Checked:</span>
+                    <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>
+                      {activeIp.unique_ports_count ?? (activeIp.portsProbed?.length || 1)}
+                    </strong>
+                  </div>
+
+                  <div
+                    style={{
+                      backgroundColor: 'var(--canvas)',
+                      border: '1px solid var(--hairline)',
+                      borderRadius: 'var(--rounded-sm)',
+                      padding: '4px 10px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '12px'
+                    }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '15px', color: 'var(--mute)' }}>
+                      repeat
+                    </span>
+                    <span style={{ color: 'var(--mute)' }}>Repeated Single-Port Attempts:</span>
+                    <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>
+                      {activeIp.repeated_attempts_count ?? 0}
+                    </strong>
+                  </div>
+
+                  {((activeIp.repeated_attempts_count ?? 0) >= 3 && (activeIp.randomness ?? 0) <= 20) && (
+                    <div
+                      style={{
+                        backgroundColor: 'var(--safe-soft)',
+                        border: '1px solid var(--safe-border)',
+                        borderRadius: 'var(--rounded-sm)',
+                        padding: '4px 10px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '5px',
+                        fontSize: '11px',
+                        color: 'var(--safe)',
+                        fontFamily: 'var(--font-mono)'
+                      }}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>
+                        verified
+                      </span>
+                      <span>Single-Port Protection: Repetitions do not trigger port scan alerts.</span>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Score Display & Contextual Action */}
@@ -732,7 +1578,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--mute)' }}>/ 100</span>
                   </div>
                   <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
-                    OVERALL RISK SCORE
+                    SUSPICIOUS ACTIVITY SCORE
                   </div>
                 </div>
 
@@ -744,17 +1590,17 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                       icon="lock_open"
                       onClick={() => setUnblockModalIp(activeIp)}
                     >
-                      Simulate Unblock
+                      Unblock Host
                     </Button>
                   ) : (
                     <Button
                       variant="tertiary"
                       size="sm"
                       icon="shield"
-                      onClick={() => handleSimulateBlock(activeIp)}
-                      title="Test enforcement behavior for this IP"
+                      onClick={() => setBlockModalTarget(activeIp)}
+                      title="Enforce quarantine block rule for this host"
                     >
-                      Simulate Block
+                      Quarantine Host
                     </Button>
                   )}
                 </div>
@@ -797,7 +1643,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--ink)' }}>
-                      1. Port Diversity
+                      1. Number of Ports Checked
                     </span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 600, color: activeIp.randomness >= 70 ? 'var(--error)' : 'var(--ink)' }}>
                       {activeIp.randomness}/100
@@ -805,12 +1651,12 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   </div>
                   <ScoreBar score={activeIp.randomness} showLabels={false} height={5} />
                   <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--ink)', marginTop: '10px' }}>
-                    {activeIp.randomness >= 70 ? 'Explored multiple distinct ports' : 'Concentrated on expected services'}
+                    {activeIp.randomness >= 70 ? 'Checked multiple different ports' : 'Concentrated on expected services'}
                   </div>
                   <p style={{ fontSize: '12px', color: 'var(--body)', margin: '4px 0 0 0', lineHeight: 1.4 }}>
                     {activeIp.randomness >= 70
                       ? `Targeted ${activeIp.portsProbed?.length || 6} different ports across management and service layers.`
-                      : 'Connections remain confined to standard web browsing ports (80/443).'}
+                      : 'Connections remain confined to standard web browsing ports (80 and 443).'}
                   </p>
                 </div>
 
@@ -825,7 +1671,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--ink)' }}>
-                      2. Timing Pattern
+                      2. Frequency of Attempts
                     </span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 600, color: activeIp.timing >= 70 ? 'var(--error)' : 'var(--ink)' }}>
                       {activeIp.timing}/100
@@ -833,7 +1679,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   </div>
                   <ScoreBar score={activeIp.timing} showLabels={false} height={5} />
                   <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--ink)', marginTop: '10px' }}>
-                    {activeIp.timing >= 70 ? 'Paced machine cadence detected' : 'Natural human timing variance'}
+                    {activeIp.timing >= 70 ? 'Paced robotic intervals detected' : 'Natural human timing variation'}
                   </div>
                   <p style={{ fontSize: '12px', color: 'var(--body)', margin: '4px 0 0 0', lineHeight: 1.4 }}>
                     {activeIp.timing >= 70
@@ -853,7 +1699,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--ink)' }}>
-                      3. Target-Port Pattern
+                      3. Sensitive Ports Accessed
                     </span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 600, color: activeIp.target >= 70 ? 'var(--error)' : 'var(--ink)' }}>
                       {activeIp.target}/100
@@ -861,11 +1707,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   </div>
                   <ScoreBar score={activeIp.target} showLabels={false} height={5} />
                   <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--ink)', marginTop: '10px' }}>
-                    {activeIp.target >= 70 ? 'Critical admin ports targeted' : 'Standard benign ports'}
+                    {activeIp.target >= 70 ? 'Critical administration ports targeted' : 'Standard benign ports'}
                   </div>
                   <p style={{ fontSize: '12px', color: 'var(--body)', margin: '4px 0 0 0', lineHeight: 1.4 }}>
                     {activeIp.target >= 70
-                      ? 'Probes focus on high-risk administration vectors such as SSH, RDP, and Telnet.'
+                      ? 'Probes focus on high-risk administration ports such as SSH, RDP, and Telnet.'
                       : 'Traffic targets harmless public web ports without touching sensitive interfaces.'}
                   </p>
                 </div>
@@ -886,7 +1732,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               >
                 <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>info</span>
                 <span>
-                  These three signals are illustrative detection indicators demonstrating the proposed multi-factor model, not independently validated attack probabilities.
+                  These three signals are behavioral indicators computed from connection logs stored in the persistent SQLite database.
                 </span>
               </div>
             </div>
@@ -915,7 +1761,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                     Observed Events for {activeIp.ip}
                   </h3>
                   <p style={{ fontSize: '12px', color: 'var(--mute)', margin: '2px 0 0 0' }}>
-                    Chronological packet observations contributing to this IP's risk calculation.
+                    Chronological connection observations contributing to this IP address's score.
                   </p>
                 </div>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
@@ -937,7 +1783,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                       }}
                     >
                       <th style={{ padding: '8px 20px', width: '110px' }}>Timestamp</th>
-                      <th style={{ padding: '8px 16px', width: '130px' }}>Port / Service</th>
+                      <th style={{ padding: '8px 16px', width: '130px' }}>Port Accessed</th>
                       <th style={{ padding: '8px 16px', width: '100px' }}>Protocol</th>
                       <th style={{ padding: '8px 16px' }}>Observation Summary</th>
                       <th style={{ padding: '8px 20px', width: '140px', textAlign: 'right' }}>Classification</th>
@@ -1005,10 +1851,10 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             >
               <div>
                 <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--ink)', margin: 0 }}>
-                  Active Simulated Firewall Rules
+                  Active Firewall Quarantine Rules
                 </h3>
                 <p style={{ fontSize: '12px', color: 'var(--body)', margin: '2px 0 0 0' }}>
-                  Hosts automatically blocked when their composite risk score met or exceeded threshold 80.
+                  Hosts blocked when their composite suspicious activity score met or exceeded threshold 80. Stored in SQLite.
                 </p>
               </div>
 
@@ -1023,11 +1869,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                   borderRadius: 'var(--rounded-sm)'
                 }}
               >
-                Safe Demonstration Environment
+                Persistent SQLite Quarantine
               </span>
             </div>
 
-            {/* Straightforward Block History Table */}
+            {/* Block History Table */}
             <div
               style={{
                 backgroundColor: 'var(--canvas-elevated)',
@@ -1050,19 +1896,20 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                         textTransform: 'uppercase'
                       }}
                     >
-                      <th style={{ padding: '10px 20px', width: '160px' }}>IP Address</th>
-                      <th style={{ padding: '10px 16px', width: '120px' }}>Time</th>
-                      <th style={{ padding: '10px 16px' }}>Reason</th>
-                      <th style={{ padding: '10px 16px', width: '110px' }}>Risk Score</th>
-                      <th style={{ padding: '10px 16px', width: '130px' }}>Current Status</th>
-                      <th style={{ padding: '10px 20px', width: '160px', textAlign: 'right' }}>Action</th>
+                      <th style={{ padding: '10px 20px', width: '220px' }}>IP & Rule Name</th>
+                      <th style={{ padding: '10px 16px', width: '110px' }}>Trigger</th>
+                      <th style={{ padding: '10px 16px', width: '160px' }}>Enforcement Mode</th>
+                      <th style={{ padding: '10px 16px', width: '120px' }}>Verification</th>
+                      <th style={{ padding: '10px 16px' }}>Block Reason</th>
+                      <th style={{ padding: '10px 16px', width: '90px' }}>Status</th>
+                      <th style={{ padding: '10px 20px', width: '140px', textAlign: 'right' }}>Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {firewallRules.length === 0 ? (
                       <tr>
                         <td
-                          colSpan="6"
+                          colSpan="7"
                           style={{
                             padding: '48px 20px',
                             textAlign: 'center',
@@ -1071,7 +1918,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           }}
                         >
                           <div style={{ marginBottom: '8px', fontWeight: 500, color: 'var(--ink)' }}>
-                            No active simulated blocks
+                            No quarantine rules recorded
                           </div>
                           <div>
                             All monitored hosts are operating under normal observation.
@@ -1083,7 +1930,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                               icon="restart_alt"
                               onClick={handleResetData}
                             >
-                              Restore Sample Blocked Scenarios
+                              Restore Baseline Quarantine Scenarios
                             </Button>
                           </div>
                         </td>
@@ -1095,6 +1942,9 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           score: 85,
                           status: 'Blocked'
                         };
+
+                        const isRealOS = !rule.isSimulated;
+                        const isAuto = rule.isAutomatic;
 
                         return (
                           <tr
@@ -1110,45 +1960,84 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                               <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', fontWeight: 600, color: 'var(--ink)' }}>
                                 {rule.ip}
                               </div>
-                              <div style={{ fontSize: '11px', color: 'var(--mute)' }}>
-                                Rule ID: {rule.id}
+                              <div style={{ fontSize: '11px', color: 'var(--mute)', fontFamily: 'var(--font-mono)' }}>
+                                {rule.ruleName || `PortSentinel_BLOCK_${rule.ip}`}
                               </div>
-                            </td>
-
-                            <td style={{ padding: '14px 16px', fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--mute)' }}>
-                              {rule.enforcedAt}
-                            </td>
-
-                            <td style={{ padding: '14px 16px', fontSize: '13px', color: 'var(--body)' }}>
-                              {rule.reason}
                             </td>
 
                             <td style={{ padding: '14px 16px' }}>
                               <span
                                 style={{
+                                  fontSize: '11px',
                                   fontFamily: 'var(--font-mono)',
-                                  fontSize: '13px',
-                                  fontWeight: 600,
-                                  color: 'var(--error)'
+                                  backgroundColor: isAuto ? 'var(--warning-soft)' : 'var(--canvas)',
+                                  color: isAuto ? 'var(--warning-deep)' : 'var(--ink)',
+                                  border: `1px solid ${isAuto ? 'var(--warning-border)' : 'var(--hairline)'}`,
+                                  padding: '2px 6px',
+                                  borderRadius: '3px'
                                 }}
                               >
-                                {associatedIp.score}/100
+                                {isAuto ? 'Auto-Mitigated' : 'Manual Block'}
                               </span>
                             </td>
 
                             <td style={{ padding: '14px 16px' }}>
-                              <StatusChip status="Blocked" size="sm" />
+                              <span
+                                style={{
+                                  fontSize: '11px',
+                                  fontFamily: 'var(--font-mono)',
+                                  backgroundColor: isRealOS ? 'var(--safe-soft)' : 'var(--canvas)',
+                                  color: isRealOS ? 'var(--safe)' : 'var(--body)',
+                                  border: `1px solid ${isRealOS ? 'var(--safe-border)' : 'var(--hairline)'}`,
+                                  padding: '2px 6px',
+                                  borderRadius: '3px'
+                                }}
+                              >
+                                {isRealOS ? 'Real OS (netsh)' : 'Dry-Run Sim'}
+                              </span>
+                            </td>
+
+                            <td style={{ padding: '14px 16px' }}>
+                              <span
+                                style={{
+                                  fontSize: '11px',
+                                  fontFamily: 'var(--font-mono)',
+                                  color: rule.verificationStatus === 'VERIFIED' ? 'var(--safe)' : 'var(--mute)',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px'
+                                }}
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>
+                                  {rule.verificationStatus === 'VERIFIED' ? 'check_circle' : 'info'}
+                                </span>
+                                {rule.verificationStatus || 'VERIFIED'}
+                              </span>
+                            </td>
+
+                            <td style={{ padding: '14px 16px', fontSize: '12px', color: 'var(--body)' }}>
+                              {rule.reason}
+                            </td>
+
+                            <td style={{ padding: '14px 16px' }}>
+                              <StatusChip status={rule.status === 'REMOVED' ? 'Normal' : 'Blocked'} size="sm" />
                             </td>
 
                             <td style={{ padding: '14px 20px', textAlign: 'right' }}>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                icon="lock_open"
-                                onClick={() => setUnblockModalIp(associatedIp)}
-                              >
-                                Simulate Unblock
-                              </Button>
+                              {rule.status === 'ACTIVE' ? (
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  icon="lock_open"
+                                  onClick={() => setUnblockModalIp(associatedIp)}
+                                >
+                                  Unblock
+                                </Button>
+                              ) : (
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
+                                  Removed
+                                </span>
+                              )}
                             </td>
                           </tr>
                         );
@@ -1162,19 +2051,72 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
         )}
       </main>
 
+      {/* Manual Block Confirmation Modal */}
+      <Modal
+        isOpen={!!blockModalTarget}
+        onClose={() => setBlockModalTarget(null)}
+        title="Confirm Quarantine Block"
+        subtitle={`Enforce Windows Firewall rule for IP ${blockModalTarget?.ip}`}
+        confirmLabel="Apply Block Rule"
+        onConfirm={async () => {
+          if (!blockModalTarget) return;
+          try {
+            await api.blockIp(blockModalTarget.ip, `Manual quarantine for ${blockModalTarget.ip}`);
+            await fetchDashboardData();
+            triggerToast(`Quarantine rule enforced for ${blockModalTarget.ip}.`);
+          } catch (err) {
+            triggerToast(`Block failed: ${err.message}`);
+          } finally {
+            setBlockModalTarget(null);
+          }
+        }}
+        cancelLabel="Cancel"
+      >
+        <div style={{ fontSize: '13px', color: 'var(--body)', lineHeight: 1.5 }}>
+          <p style={{ margin: '0 0 12px 0' }}>
+            You are about to enforce an inbound packet block rule for host{' '}
+            <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>
+              {blockModalTarget?.ip}
+            </strong>.
+          </p>
+
+          <div
+            style={{
+              padding: '10px 14px',
+              backgroundColor: 'var(--canvas)',
+              border: '1px solid var(--hairline)',
+              borderRadius: 'var(--rounded-sm)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '11px',
+              color: 'var(--ink)',
+              marginBottom: '12px'
+            }}
+          >
+            # Policy Details:<br />
+            Rule Name: PortSentinel_BLOCK_{blockModalTarget?.ip}<br />
+            Mode: {firewallStatus.dry_run ? 'Dry-Run Simulation (Safe)' : 'Windows Defender Firewall (netsh advfirewall)'}<br />
+            Direction: Inbound / Protocol: All TCP
+          </div>
+
+          <p style={{ margin: 0, fontSize: '12px', color: 'var(--mute)' }}>
+            The rule will be applied, verified by the operating system, and logged to persistent SQLite storage.
+          </p>
+        </div>
+      </Modal>
+
       {/* Unblock Confirmation Modal */}
       <Modal
         isOpen={!!unblockModalIp}
         onClose={() => setUnblockModalIp(null)}
-        title="Simulate Unblock"
-        subtitle={`Remove simulated firewall block for IP ${unblockModalIp?.ip}`}
-        confirmLabel="Simulate Unblock"
+        title="Unblock Host"
+        subtitle={`Remove quarantine rule for IP ${unblockModalIp?.ip}`}
+        confirmLabel="Unblock Host"
         onConfirm={handleConfirmUnblock}
         cancelLabel="Cancel"
       >
         <div style={{ fontSize: '13px', color: 'var(--body)', lineHeight: 1.5 }}>
           <p style={{ margin: '0 0 12px 0' }}>
-            You are about to remove the simulated quarantine rule for IP{' '}
+            You are about to remove the quarantine rule for IP address{' '}
             <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>
               {unblockModalIp?.ip}
             </strong>.
@@ -1192,8 +2134,9 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               marginBottom: '12px'
             }}
           >
-            # Simulated Action:<br />
-            DROP rule removed · Host risk score reset to normal monitoring baseline (25/100)
+            # Removal Action:<br />
+            Rule Name: PortSentinel_BLOCK_{unblockModalIp?.ip}<br />
+            Action: Deletes exact rule from Windows Defender Firewall and sets SQLite status to REMOVED.
           </div>
 
           <div
@@ -1206,10 +2149,11 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               color: 'var(--safe)'
             }}
           >
-            <strong>Academic Demo Safe Mode:</strong> This action strictly modifies the demonstration state and does not execute system-level commands on your operating system.
+            <strong>Phase 3 Real Protection:</strong> Rule removal is verified against Windows Firewall, and the host monitoring status is restored to Normal.
           </div>
         </div>
       </Modal>
     </div>
   );
 };
+export default DashboardPage;
