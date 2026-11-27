@@ -342,6 +342,18 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     }
   };
 
+  // Clear all demonstration/fake data in SQLite for 100% pure real device capture
+  const handleClearAllData = async () => {
+    try {
+      await api.clearAllData();
+      setSelectedIpId(null);
+      await fetchDashboardData();
+      triggerToast('All mock data cleared! Now in 100% Live Capture Mode.');
+    } catch (err) {
+      triggerToast(`Clear failed: ${err.message}`);
+    }
+  };
+
   // Jump from Overview or Block History directly to Threat Analysis with that IP selected
   const handleInvestigateIp = (ipId) => {
     setSelectedIpId(ipId);
@@ -565,6 +577,16 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               title="Refresh telemetry from backend"
             >
               Refresh
+            </Button>
+            <Button
+              variant="tertiary"
+              size="sm"
+              icon="delete_sweep"
+              onClick={handleClearAllData}
+              title="Clear all fake and mock data for 100% real live device testing"
+              style={{ color: 'var(--error)' }}
+            >
+              Clear Fake Data
             </Button>
             <Button
               variant="tertiary"

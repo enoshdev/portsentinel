@@ -23,7 +23,7 @@ class Settings:
     CORS_ORIGINS: List[str] = [origin.strip() for origin in _raw_cors.split(",") if origin.strip()]
     
     # Operational Modes
-    DEMO_MODE: bool = os.getenv("DEMO_MODE", "True").lower() in ("true", "1", "yes")
+    DEMO_MODE: bool = os.getenv("DEMO_MODE", "False").lower() in ("true", "1", "yes")
     SIMULATED_FIREWALL: bool = os.getenv("SIMULATED_FIREWALL", "False").lower() in ("true", "1", "yes")
     FIREWALL_DRY_RUN: bool = os.getenv("FIREWALL_DRY_RUN", "True").lower() in ("true", "1", "yes")
     AUTO_BLOCK_ENABLED: bool = os.getenv("AUTO_BLOCK_ENABLED", "False").lower() in ("true", "1", "yes")

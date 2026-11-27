@@ -13,11 +13,12 @@ from backend.app.routes import api_router, websocket_router
 async def lifespan(app: FastAPI):
     """Lifecycle event handler for database initialization and initial scenario seeding."""
     init_db()
-    db = SessionLocal()
-    try:
-        seed_demo_data(db=db, force=False)
-    finally:
-        db.close()
+    if settings.DEMO_MODE:
+        db = SessionLocal()
+        try:
+            seed_demo_data(db=db, force=False)
+        finally:
+            db.close()
     yield
 
 app = FastAPI(

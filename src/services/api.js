@@ -126,9 +126,13 @@ export const api = {
       body: JSON.stringify({ ip }),
     }),
 
-  // Demonstration Data Reset
+  // Demonstration Data Reset & Clear
   resetDemoData: () =>
     request('/demo/reset', {
+      method: 'POST',
+    }),
+  clearAllData: () =>
+    request('/demo/clear', {
       method: 'POST',
     }),
 
