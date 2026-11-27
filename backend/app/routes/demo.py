@@ -9,6 +9,7 @@ from backend.app.models.risk_history import RiskHistory
 from backend.app.models.firewall_rule import FirewallRule
 from backend.app.services.detection_engine import engine_instance
 from backend.app.services.event_processor import event_processor
+from backend.app.services.sniffer_service import sniffer_service
 from backend.app.services.websocket_manager import ws_manager
 
 router = APIRouter(prefix="/demo", tags=["Demonstration Management"])
@@ -39,9 +40,10 @@ def clear_all_data(db: Session = Depends(get_db)) -> Dict[str, Any]:
     db.query(MonitoredIP).delete()
     db.commit()
     
-    # Clear in-memory caches
+    # Clear in-memory caches and counters
     engine_instance.clear_history()
     event_processor._flow_cache.clear()
+    sniffer_service.packets_captured = 0
     ws_manager.broadcast_sync({"type": "DATA_CLEARED"})
     
     return {

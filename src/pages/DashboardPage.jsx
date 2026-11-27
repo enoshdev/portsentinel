@@ -250,7 +250,16 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     const ws = createTelemetryWebSocket(
       (telemetry) => {
         if (telemetry.type === 'DATA_CLEARED') {
-          fetchDashboardData(true);
+          setMonitoredIps([]);
+          setPacketLogs([]);
+          setFirewallRules([]);
+          setBackendStats(null);
+          setSelectedIpId(null);
+          setMonitoringState((prev) => ({ ...prev, packets_captured: 0 }));
+          setClientDevice((prev) =>
+            prev ? { ...prev, risk_score: 0, status: 'Normal', ports_probed: [], connection_attempts: 0 } : null
+          );
+          triggerToast('All data cleared across all connected devices.');
           return;
         }
         if (telemetry.type === 'FIREWALL_ACTION') {
@@ -413,17 +422,19 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
   const activeIp = useMemo(() => {
     if (monitoredIps.length === 0) {
       return {
-        id: 'stealth',
-        ip: '203.0.113.77',
-        label: 'Slow / stealth scanner',
-        type: 'External Host',
-        description: 'Patient, periodic reconnaissance across sensitive administration ports.',
-        score: 84,
-        status: 'Blocked',
-        randomness: 88,
-        timing: 94,
-        target: 82,
-        portsProbed: [22, 3389, 5900, 8080, 1025, 23],
+        id: 'no-hosts',
+        ip: 'No Device Selected',
+        label: 'Awaiting Live Connection',
+        type: 'Network Idle',
+        description: 'No devices connected yet. Open the website or start capture to monitor live connections.',
+        score: 0,
+        status: 'Normal',
+        randomness: 0,
+        timing: 0,
+        target: 0,
+        unique_ports_count: 0,
+        repeated_attempts_count: 0,
+        portsProbed: [],
         timelineData: []
       };
     }
@@ -432,23 +443,24 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
 
   // Reset demonstration data in SQLite via backend API
   const handleResetData = async () => {
-    try {
-      await api.resetDemoData();
-      setSelectedIpId('stealth');
-      await fetchDashboardData();
-      triggerToast('Demonstration data reset to initial baseline in SQLite.');
-    } catch (err) {
-      triggerToast(`Reset failed: ${err.message}`);
-    }
+    await handleClearAllData();
   };
 
-  // Clear all demonstration/fake data in SQLite for 100% pure real device capture
+  // Clear all data in SQLite and reset UI cleanly to 0 for live device testing
   const handleClearAllData = async () => {
     try {
-      await api.clearAllData();
+      setMonitoredIps([]);
+      setPacketLogs([]);
+      setFirewallRules([]);
+      setBackendStats(null);
       setSelectedIpId(null);
-      await fetchDashboardData();
-      triggerToast('All mock data cleared! Now in 100% Live Capture Mode.');
+      setMonitoringState((prev) => ({ ...prev, packets_captured: 0 }));
+      setClientDevice((prev) =>
+        prev ? { ...prev, risk_score: 0, status: 'Normal', ports_probed: [], connection_attempts: 0 } : null
+      );
+      await api.clearAllData();
+      await fetchDashboardData(true);
+      triggerToast('All data wiped clean! Ready for fresh live demo.');
     } catch (err) {
       triggerToast(`Clear failed: ${err.message}`);
     }
@@ -664,21 +676,20 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <Button
-              variant="tertiary"
+              variant="secondary"
               size="sm"
               icon="refresh"
-              onClick={fetchDashboardData}
+              onClick={() => fetchDashboardData(false)}
               title="Refresh telemetry from backend"
             >
               Refresh
             </Button>
             <Button
-              variant="tertiary"
+              variant="destructive"
               size="sm"
               icon="delete_sweep"
               onClick={handleClearAllData}
-              title="Clear all records and reset dashboard to clean live mode"
-              style={{ color: 'var(--error)' }}
+              title="Clear all records and reset dashboard to 0"
             >
               Reset / Clear Data
             </Button>
