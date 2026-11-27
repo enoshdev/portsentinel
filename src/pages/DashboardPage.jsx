@@ -677,19 +677,10 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               size="sm"
               icon="delete_sweep"
               onClick={handleClearAllData}
-              title="Clear all fake and mock data for 100% real live device testing"
+              title="Clear all records and reset dashboard to clean live mode"
               style={{ color: 'var(--error)' }}
             >
-              Clear Fake Data
-            </Button>
-            <Button
-              variant="tertiary"
-              size="sm"
-              icon="restart_alt"
-              onClick={handleResetData}
-              title="Reset demonstration data to baseline in SQLite"
-            >
-              Reset Data
+              Reset / Clear Data
             </Button>
           </div>
         </div>
@@ -2193,16 +2184,6 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           </div>
                           <div>
                             All monitored hosts are operating under normal observation.
-                          </div>
-                          <div style={{ marginTop: '16px' }}>
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              icon="restart_alt"
-                              onClick={handleResetData}
-                            >
-                              Restore Baseline Quarantine Scenarios
-                            </Button>
                           </div>
                         </td>
                       </tr>
