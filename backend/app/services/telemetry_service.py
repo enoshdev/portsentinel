@@ -102,6 +102,7 @@ def format_monitored_ip(ip_row: MonitoredIP, db: Session) -> MonitoredIPResponse
         blockReason=ip_row.block_reason,
         isAllowlisted=ip_row.is_allowlisted,
         portsProbed=ip_row.get_ports_list(),
+        connectionAttempts=ip_row.connection_attempts or 1,
         timelineData=timeline_points
     )
 

@@ -148,13 +148,48 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     }
   };
 
+  // Connect specific ports from this client device to demonstrate live port & risk calculation
+  const handleConnectClientPorts = async (ports, labelText) => {
+    setIsClientScanning(true);
+    try {
+      const res = await api.connectClientPorts(ports);
+      triggerToast(`${labelText} (${res.client_ip}) -> Ports ${ports.join(', ')} | Score: ${res.final_score}/100 (${res.final_status})`);
+      setClientDevice((prev) =>
+        prev
+          ? {
+              ...prev,
+              risk_score: res.final_score,
+              status: res.final_status,
+              ports_probed: res.ports_probed,
+              connection_attempts: res.connection_attempts
+            }
+          : null
+      );
+      await fetchDashboardData();
+    } catch (err) {
+      triggerToast(`Connection error: ${err.message}`);
+    } finally {
+      setIsClientScanning(false);
+    }
+  };
+
   // Trigger real multi-port probe from this client device
   const handleTriggerClientScan = async () => {
     setIsClientScanning(true);
     try {
       const res = await api.triggerClientDeviceScan();
-      triggerToast(`🔥 Probed 6 ports from this device (${res.source_ip})! Risk Score: ${res.final_score} (${res.final_status}).`);
-      setClientDevice((prev) => prev ? { ...prev, risk_score: res.final_score, status: res.final_status } : null);
+      triggerToast(`🔥 Probed ${res.probed_ports.length} ports from this device (${res.source_ip})! Risk Score: ${res.final_score} (${res.final_status}).`);
+      setClientDevice((prev) =>
+        prev
+          ? {
+              ...prev,
+              risk_score: res.final_score,
+              status: res.final_status,
+              ports_probed: res.ports_probed,
+              connection_attempts: res.connection_attempts
+            }
+          : null
+      );
       await fetchDashboardData();
     } catch (err) {
       triggerToast(`Scan error: ${err.message}`);
@@ -237,7 +272,9 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               return {
                 ...prevClient,
                 risk_score: tData.score,
-                status: tData.status
+                status: tData.status,
+                ports_probed: tData.ports_probed || prevClient.ports_probed,
+                connection_attempts: tData.connection_attempts ?? ((prevClient.connection_attempts || 1) + 1)
               };
             }
             return prevClient;
@@ -261,6 +298,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 unique_ports_count: tData.signals?.unique_ports ?? updated[index].unique_ports_count,
                 repeated_attempts_count: tData.signals?.repeated_attempts ?? updated[index].repeated_attempts_count,
                 portsProbed: nextPorts,
+                connectionAttempts: tData.connection_attempts ?? ((updated[index].connectionAttempts || 1) + 1),
                 description: tData.verdict || updated[index].description,
                 lastSeen: new Date().toLocaleTimeString()
               };
@@ -280,6 +318,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 unique_ports_count: tData.signals?.unique_ports || 1,
                 repeated_attempts_count: tData.signals?.repeated_attempts || 0,
                 portsProbed: tData.ports_probed || [tData.destination_port],
+                connectionAttempts: tData.connection_attempts || 1,
                 lastSeen: new Date().toLocaleTimeString(),
                 timelineData: []
               };
@@ -434,23 +473,17 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     }
   };
 
-  // Computed or backend summary metrics
+  // Real-time computed summary metrics (updates immediately with WebSocket telemetry)
   const activeStats = useMemo(() => {
-    if (backendStats) {
-      return {
-        activeConnections: backendStats.activeConnections,
-        scansDetected: backendStats.scansDetected,
-        ipsBlocked: backendStats.ipsBlocked,
-        avgResponse: backendStats.avgResponse
-      };
-    }
     const scansDetected = monitoredIps.filter((i) => i.status === 'Confirmed Scan' || i.status === 'Blocked').length;
     const ipsBlocked = firewallRules.filter((r) => r.status === 'ACTIVE').length;
+    const totalDeviceAttempts = monitoredIps.reduce((acc, ip) => acc + (ip.connectionAttempts || 1), 0);
+    const activeConnections = Math.max(packetLogs.length, totalDeviceAttempts, backendStats?.activeConnections || 0);
     return {
-      activeConnections: packetLogs.length || 30,
-      scansDetected,
-      ipsBlocked,
-      avgResponse: '1.4 ms'
+      activeConnections,
+      scansDetected: Math.max(scansDetected, backendStats?.scansDetected || 0),
+      ipsBlocked: Math.max(ipsBlocked, backendStats?.ipsBlocked || 0),
+      avgResponse: backendStats?.avgResponse || '1.4 ms'
     };
   }, [backendStats, monitoredIps, firewallRules, packetLogs]);
 
@@ -728,7 +761,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                 }}
               >
                 <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>
-                  {clientDevice?.device_type?.includes('Phone') ? 'smartphone' : clientDevice?.device_type?.includes('iPad') ? 'tablet' : 'laptop'}
+                  {clientDevice?.device_type?.toLowerCase().includes('phone') ? 'smartphone' : clientDevice?.device_type?.includes('iPad') ? 'tablet' : 'laptop'}
                 </span>
               </span>
               <div>
@@ -756,7 +789,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                       <span>{clientDevice.device_type}</span>{' '}
                       <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--body)' }}>({clientDevice.client_ip})</span>{' '}
                       <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--mute)' }}>
-                        — Destination Port: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{clientDevice.port} (HTTP)</strong> | Risk Score: <strong style={{ color: clientDevice.risk_score >= 80 ? 'var(--error)' : clientDevice.risk_score >= 30 ? 'var(--warning-deep)' : 'var(--safe)' }}>{clientDevice.risk_score}/100</strong>
+                        — Ports: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{(clientDevice.ports_probed || [clientDevice.port]).length}</strong> ({(clientDevice.ports_probed || [clientDevice.port]).slice(0, 6).join(', ')}{(clientDevice.ports_probed?.length || 0) > 6 ? '...' : ''}) | Traffic: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{clientDevice.connection_attempts || 1} req</strong> | Score: <strong style={{ color: clientDevice.risk_score >= 80 ? 'var(--error)' : clientDevice.risk_score >= 30 ? 'var(--warning-deep)' : 'var(--safe)' }}>{clientDevice.risk_score}/100</strong>
                       </span>
                     </>
                   ) : (
@@ -766,17 +799,37 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="language"
+                disabled={isClientScanning}
+                onClick={() => handleConnectClientPorts([80, 443], 'Web Traffic')}
+                title="Connect standard HTTP/HTTPS ports (80, 443) from this device"
+              >
+                🌐 Web (80, 443)
+              </Button>
+              <Button
+                variant="tertiary"
+                size="sm"
+                icon="terminal"
+                disabled={isClientScanning}
+                onClick={() => handleConnectClientPorts([22, 3306], 'SSH & DB Probe')}
+                title="Probe sensitive SSH & MySQL ports (22, 3306) from this device"
+              >
+                🔑 SSH / DB (22, 3306)
+              </Button>
               <Button
                 variant={clientDevice?.risk_score >= 80 ? 'secondary' : 'primary'}
                 size="sm"
                 icon="radar"
                 loading={isClientScanning}
                 onClick={handleTriggerClientScan}
-                title="Send real multi-port probe requests from this device to demonstrate live detection"
+                title="Sweep 12 ports from this device to trigger high-risk scan detection"
                 style={clientDevice?.risk_score < 80 ? { backgroundColor: '#f85149', borderColor: '#f85149' } : {}}
               >
-                {isClientScanning ? 'Probing Ports...' : '🔥 Scan Ports from this Device'}
+                {isClientScanning ? 'Probing Ports...' : '🔥 Scan Ports (12 Ports)'}
               </Button>
             </div>
           </div>
@@ -1444,28 +1497,33 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
                           </td>
 
                           <td style={{ padding: '12px 16px' }}>
-                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                              {ports.slice(0, 6).map((p) => (
-                                <span
-                                  key={p}
-                                  style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: '11px',
-                                    color: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-deep)' : 'var(--ink)',
-                                    backgroundColor: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-soft)' : 'var(--canvas)',
-                                    border: '1px solid var(--hairline)',
-                                    padding: '1px 6px',
-                                    borderRadius: '3px'
-                                  }}
-                                >
-                                  {p} ({getPortService(p)})
-                                </span>
-                              ))}
-                              {ports.length > 6 && (
-                                <span style={{ fontSize: '11px', color: 'var(--mute)', fontFamily: 'var(--font-mono)' }}>
-                                  +{ports.length - 6} more
-                                </span>
-                              )}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--mute)' }}>
+                                {ports.length} {ports.length === 1 ? 'port' : 'ports'} · {item.connectionAttempts || 1} {(item.connectionAttempts || 1) === 1 ? 'request' : 'requests'}
+                              </span>
+                              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                {ports.slice(0, 6).map((p) => (
+                                  <span
+                                    key={p}
+                                    style={{
+                                      fontFamily: 'var(--font-mono)',
+                                      fontSize: '11px',
+                                      color: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-deep)' : 'var(--ink)',
+                                      backgroundColor: [21, 22, 23, 3389, 445, 5900].includes(p) ? 'var(--error-soft)' : 'var(--canvas)',
+                                      border: '1px solid var(--hairline)',
+                                      padding: '1px 6px',
+                                      borderRadius: '3px'
+                                    }}
+                                  >
+                                    {p} ({getPortService(p)})
+                                  </span>
+                                ))}
+                                {ports.length > 6 && (
+                                  <span style={{ fontSize: '11px', color: 'var(--mute)', fontFamily: 'var(--font-mono)' }}>
+                                    +{ports.length - 6} more
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </td>
 

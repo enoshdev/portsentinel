@@ -199,6 +199,7 @@ class EventProcessor:
                 "label": host.label,
                 "destination_port": destination_port,
                 "ports_probed": host.get_ports_list(),
+                "connection_attempts": host.connection_attempts,
                 "protocol": f"{protocol} {tcp_flags}".strip(),
                 "status": host.current_status,
                 "verdict": verdict,

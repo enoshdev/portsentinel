@@ -29,6 +29,7 @@ class MonitoredIPResponse(BaseModel):
     blockReason: Optional[str] = None
     isAllowlisted: bool = False
     portsProbed: List[int] = []
+    connectionAttempts: int = 1
     timelineData: List[TimelinePoint] = []
 
 class ConnectionEventResponse(BaseModel):

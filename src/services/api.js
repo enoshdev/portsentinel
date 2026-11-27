@@ -138,6 +138,11 @@ export const api = {
 
   // Live Connected Device Registration & Interactive Port Scan
   getClientDevice: () => request('/monitoring/client-device'),
+  connectClientPorts: (ports) =>
+    request('/monitoring/client-device/connect', {
+      method: 'POST',
+      body: JSON.stringify({ ports }),
+    }),
   triggerClientDeviceScan: () =>
     request('/monitoring/client-device/scan', {
       method: 'POST',
