@@ -49,6 +49,8 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
   const [isStartingMonitoring, setIsStartingMonitoring] = useState(false);
   const [isSimulatingTraffic, setIsSimulatingTraffic] = useState(false);
   const [telemetryWsStatus, setTelemetryWsStatus] = useState('disconnected');
+  const [clientDevice, setClientDevice] = useState(null);
+  const [isClientScanning, setIsClientScanning] = useState(false);
 
   // Phase 3: Firewall & Mitigation State
   const [firewallStatus, setFirewallStatus] = useState({
@@ -135,6 +137,31 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     }
   };
 
+  // Register and identify current client device (phone / laptop)
+  const fetchClientDevice = async () => {
+    try {
+      const info = await api.getClientDevice();
+      setClientDevice(info);
+    } catch (e) {
+      console.warn('Could not register client device:', e);
+    }
+  };
+
+  // Trigger real multi-port probe from this client device
+  const handleTriggerClientScan = async () => {
+    setIsClientScanning(true);
+    try {
+      const res = await api.triggerClientDeviceScan();
+      triggerToast(`🔥 Probed 6 ports from this device (${res.source_ip})! Risk Score: ${res.final_score} (${res.final_status}).`);
+      setClientDevice((prev) => prev ? { ...prev, risk_score: res.final_score, status: res.final_status } : null);
+      await fetchDashboardData();
+    } catch (err) {
+      triggerToast(`Scan error: ${err.message}`);
+    } finally {
+      setIsClientScanning(false);
+    }
+  };
+
   // Fetch all primary dashboard data from FastAPI backend
   const fetchDashboardData = async () => {
     setIsLoading(true);
@@ -168,6 +195,7 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
     fetchDashboardData();
     fetchMonitoringStatus();
     fetchInterfaces();
+    fetchClientDevice();
   }, []);
 
   // Real-time WebSocket Telemetry streaming
@@ -652,6 +680,89 @@ export const DashboardPage = ({ onNavigateLanding, onNavigateRoute }) => {
             gap: '14px'
           }}
         >
+          {/* Row 0: Live Connected Device Tracker (Your Phone / Client) */}
+          <div
+            style={{
+              backgroundColor: 'var(--canvas)',
+              border: clientDevice?.risk_score >= 80 ? '1px solid var(--error)' : '1px solid var(--hairline)',
+              borderRadius: 'var(--rounded-md)',
+              padding: '14px 18px',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '14px',
+              boxShadow: clientDevice?.risk_score >= 80 ? '0 0 14px rgba(238, 0, 0, 0.25)' : 'none',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+              <span
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '50%',
+                  backgroundColor: clientDevice?.risk_score >= 80 ? 'var(--error-soft)' : 'var(--safe-soft)',
+                  color: clientDevice?.risk_score >= 80 ? 'var(--error)' : 'var(--safe)'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>
+                  {clientDevice?.device_type?.includes('Phone') ? 'smartphone' : clientDevice?.device_type?.includes('iPad') ? 'tablet' : 'laptop'}
+                </span>
+              </span>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--mute)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Live Connected Device Tracker
+                  </span>
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      fontFamily: 'var(--font-mono)',
+                      fontWeight: 600,
+                      color: clientDevice?.risk_score >= 80 ? 'var(--error)' : 'var(--safe)',
+                      backgroundColor: clientDevice?.risk_score >= 80 ? 'var(--error-soft)' : 'var(--safe-soft)',
+                      padding: '2px 8px',
+                      borderRadius: 'var(--rounded-sm)'
+                    }}
+                  >
+                    ● {clientDevice?.risk_score >= 80 ? 'FLAGGED AS SCANNER' : 'CONNECTED & MONITORED'}
+                  </span>
+                </div>
+                <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--ink)', marginTop: '4px' }}>
+                  {clientDevice ? (
+                    <>
+                      <span>{clientDevice.device_type}</span>{' '}
+                      <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--body)' }}>({clientDevice.client_ip})</span>{' '}
+                      <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--mute)' }}>
+                        — Destination Port: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{clientDevice.port} (HTTP)</strong> | Risk Score: <strong style={{ color: clientDevice.risk_score >= 80 ? 'var(--error)' : clientDevice.risk_score >= 30 ? 'var(--warning-deep)' : 'var(--safe)' }}>{clientDevice.risk_score}/100</strong>
+                      </span>
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--mute)', fontStyle: 'italic' }}>Detecting connecting device...</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <Button
+                variant={clientDevice?.risk_score >= 80 ? 'secondary' : 'primary'}
+                size="sm"
+                icon="radar"
+                loading={isClientScanning}
+                onClick={handleTriggerClientScan}
+                title="Send real multi-port probe requests from this device to demonstrate live detection"
+                style={clientDevice?.risk_score < 80 ? { backgroundColor: '#f85149', borderColor: '#f85149' } : {}}
+              >
+                {isClientScanning ? 'Probing Ports...' : '🔥 Scan Ports from this Device'}
+              </Button>
+            </div>
+          </div>
+
           {/* Row 1: Real Network Packet Sniffer (Windows / Npcap / Scapy) */}
           <div
             style={{

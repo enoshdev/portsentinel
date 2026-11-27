@@ -136,6 +136,13 @@ export const api = {
       method: 'POST',
     }),
 
+  // Live Connected Device Registration & Interactive Port Scan
+  getClientDevice: () => request('/monitoring/client-device'),
+  triggerClientDeviceScan: () =>
+    request('/monitoring/client-device/scan', {
+      method: 'POST',
+    }),
+
   // Phase 2: Live Network Monitoring Controls
   getMonitoringStatus: () => request('/monitoring/status'),
   getInterfaces: () => request('/monitoring/interfaces'),
